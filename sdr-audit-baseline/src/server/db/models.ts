@@ -165,20 +165,22 @@ appointmentSchema.index({ leadId: 1, start: 1 });
 export const AppointmentModel = model("Appointment", appointmentSchema);
 
 const knowledgeDocumentSchema = new Schema({
-  documentId: requiredString, title: requiredString, fileName: requiredString,
+  documentId: requiredString, workspaceId: { ...requiredString, default: "workspace_default" }, title: requiredString, fileName: requiredString,
   contentType: requiredString, size: { type: Number, min: 0, required: true },
   storageKey: String,
-  status: { ...requiredString, enum: ["pending", "ready", "failed"], default: "pending" },
+  status: { ...requiredString, enum: ["uploaded", "processing", "indexed", "failed", "deleted", "pending", "ready"], default: "uploaded" },
+  error: String, checksum: String,
 }, documentOptions);
 knowledgeDocumentSchema.index({ documentId: 1 }, { unique: true });
-knowledgeDocumentSchema.index({ status: 1, createdAt: -1 });
+knowledgeDocumentSchema.index({ workspaceId: 1, status: 1, createdAt: -1 });
 export const KnowledgeDocumentModel = model("KnowledgeDocument", knowledgeDocumentSchema);
 
 const knowledgeChunkSchema = new Schema({
-  documentId: requiredString, position: { type: Number, min: 0, required: true }, content: requiredString,
+  documentId: requiredString, workspaceId: { ...requiredString, default: "workspace_default" }, position: { type: Number, min: 0, required: true }, content: requiredString,
+  embedding: { type: [Number], default: undefined }, page: Number, section: String,
 }, documentOptions);
 knowledgeChunkSchema.index({ documentId: 1, position: 1 }, { unique: true });
-knowledgeChunkSchema.index({ content: "text" });
+knowledgeChunkSchema.index({ workspaceId: 1, content: "text" });
 export const KnowledgeChunkModel = model("KnowledgeChunk", knowledgeChunkSchema);
 
 const agentConfigurationSchema = new Schema({

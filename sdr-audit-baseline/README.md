@@ -15,6 +15,13 @@ transport for speech-to-text and text-to-speech only — it never owns the conve
 - `@vapi-ai/server-sdk` / `@vapi-ai/web` for the optional voice layer
 - MongoDB Atlas with Mongoose and optional demo seed fixtures
 
+## Quick guide (Hinglish)
+
+For step-by-step local startup, every dashboard feature check, interactive English/Hindi examples,
+Vapi browser voice credential mapping and troubleshooting, read
+[`docs/USER_GUIDE_HINGLISH.md`](docs/USER_GUIDE_HINGLISH.md). The guide distinguishes configured
+features from external integrations that still need live verification.
+
 ## Phase 4 browser voice setup
 
 The **Vapi Live Voice** call mode uses browser audio. Vapi transports speech and sends each Custom LLM request to Carla in Express; Carla's reasoning, tools, and MongoDB writes remain on the backend. This mode is separate from the older text-interactive mode and its optional muted Vapi playback.
@@ -84,8 +91,8 @@ Tests start a disposable local replica set when `mongod` is on PATH. Set `MONGOD
 ## Design direction
 
 The dashboard includes a **Live Calls** console for Carla's conversation, call duration, tools,
-and outcome. It also includes a lead directory, browser-local reporting, an appointment calendar,
-knowledge files, and agent preferences.
+and outcome. It also includes a lead directory, appointment calendar, backend knowledge files,
+reporting, and agent preferences.
 
 The screen keeps the agent (Carla) centered with a CSS-only speaking/thinking/listening indicator, a
 clear End Call button, and a side transcript panel with visually separated agent and lead bubbles. A
@@ -196,15 +203,22 @@ qualification breakdown. The score allocates 30 points for business need, 20 for
 
 ### Approved knowledge
 
-With the backend running, add approved plain-text company facts through the API. Each text document
-is chunked and indexed in MongoDB. Carla's factual product replies use an exact verified excerpt or
-offer a human follow-up. Dashboard files still use browser-local storage. The demo seeds a small
-guide when `SEED_DEMO_DATA=true`.
+The Knowledge Base sends PDF, DOCX, and TXT bytes to the backend. Files are stored under
+`KNOWLEDGE_UPLOAD_DIR`, extracted, chunked, and indexed in MongoDB. Carla uses workspace-scoped
+retrieval, quotes an approved excerpt, or offers human follow-up. By default retrieval is MongoDB
+text search. Enable embeddings and configure an Atlas Vector Search index as described in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) before calling retrieval semantic vector search.
+The demo guide is seeded when `SEED_DEMO_DATA=true`.
 
 ```powershell
-$document = @{ title = 'Approved product guide'; content = '<replace with verified company facts>' } | ConvertTo-Json
-Invoke-RestMethod http://localhost:3001/api/knowledge/documents -Method Post -ContentType 'application/json' -Body $document
+$form = @{ file = Get-Item .\product-guide.pdf }
+Invoke-RestMethod http://localhost:3001/api/knowledge/documents/upload -Method Post -Form $form
 ```
+
+Knowledge endpoints include `GET /api/knowledge/documents`, `GET /api/knowledge/documents/:id`,
+`DELETE /api/knowledge/documents/:id`, `POST /api/knowledge/documents/:id/reprocess`, and
+`GET /api/knowledge/search?q=...`. There is one server-controlled local workspace; this is not
+multi-tenant authentication.
 
 ## Two-minute demo
 

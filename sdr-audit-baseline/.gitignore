@@ -18,6 +18,7 @@ build/
 coverage/
 logs/
 mongo-dev-data/
+uploads/
 
 # local virtual environments
 venv/

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { defaults, formatDate, formatTime } from './model'
 import type { AgentProfile, CallRecord, Preferences } from './model'
 import { Badge, CardHeader, Empty, Icon, Overlay } from './ui'
+import { apiBase } from './model'
 
 type DocumentRecord = { id: string; file: File; uploadedAt: number }
 
@@ -25,7 +26,7 @@ async function documentStore<T>(mode: IDBTransactionMode, action: (store: IDBObj
   }
 }
 
-export function KnowledgeBase() {
+export function LegacyKnowledgeBase() {
   const [docs, setDocs] = useState<DocumentRecord[]>([])
   const [busy, setBusy] = useState(true)
   const [dragging, setDragging] = useState(false)
@@ -130,6 +131,70 @@ export function KnowledgeBase() {
       <div className="dialog-actions"><button type="button" className="button button-secondary" onClick={() => setPendingDelete(null)}>Cancel</button>
         <button type="button" className="button button-danger" onClick={() => void remove(pendingDelete)}>Remove document</button></div>
     </Overlay>}
+  </>
+}
+
+type BackendDocument = { documentId: string; title: string; fileName: string; size: number; status: string; error?: string; createdAt: string }
+
+export function KnowledgeBase() {
+  const input = useRef<HTMLInputElement>(null)
+  const [docs, setDocs] = useState<BackendDocument[]>([])
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+  const [query, setQuery] = useState('')
+  const [sources, setSources] = useState<Array<{ title: string; content: string }>>([])
+  const [mode, setMode] = useState('')
+  const [progress, setProgress] = useState(0)
+  async function refresh() {
+    const response = await fetch(apiBase + '/api/knowledge/documents')
+    if (!response.ok) throw new Error('Could not load backend documents.')
+    setDocs(((await response.json()) as { documents: BackendDocument[] }).documents)
+  }
+  useEffect(() => { void refresh().catch((error: unknown) => setMessage(error instanceof Error ? error.message : 'API unavailable')) }, [])
+  async function upload(files: File[]) {
+    setBusy(true); setMessage('')
+    try {
+      for (const file of files) {
+        const body = new FormData(); body.append('file', file)
+        await new Promise<void>((resolve, reject) => {
+          const request = new XMLHttpRequest()
+          request.open('POST', apiBase + '/api/knowledge/documents/upload')
+          request.upload.onprogress = (event) => { if (event.lengthComputable) setProgress(Math.round(event.loaded * 100 / event.total)) }
+          request.onerror = () => reject(new Error('Upload connection failed.'))
+          request.onload = () => {
+            const data = JSON.parse(request.responseText || '{}') as { error?: string }
+            if (request.status >= 200 && request.status < 300) resolve()
+            else reject(new Error(data.error || 'Upload failed.'))
+          }
+          request.send(body)
+        })
+      }
+      setMessage('Upload and processing complete.'); await refresh()
+    } catch (error) { setMessage(error instanceof Error ? error.message : 'Upload failed.') }
+    finally { setBusy(false); setProgress(0) }
+  }
+  async function remove(documentId: string) {
+    const response = await fetch(`${apiBase}/api/knowledge/documents/${encodeURIComponent(documentId)}`, { method: 'DELETE' })
+    if (response.ok) await refresh(); else setMessage('Could not delete document.')
+  }
+  return <>
+    <section className="panel chart-card"><CardHeader title="Add documents" detail="Backend ingestion · PDF, DOCX or TXT · 10 MB maximum" />
+      <input ref={input} type="file" multiple accept=".pdf,.docx,.txt" hidden onChange={(event) => { void upload(Array.from(event.target.files ?? [])); event.target.value = '' }} />
+      <button className="button button-primary" disabled={busy} onClick={() => input.current?.click()}><Icon name="upload" /> {busy ? 'Uploading…' : 'Choose files'}</button>
+      {busy && <p role="status">Uploading file: {progress}% · The backend extracts and indexes it after transfer.</p>}
+      {message && <p className="feedback" role="status">{message}</p>}
+    </section>
+    <section className="panel table-panel"><CardHeader title="Documents" detail={`${docs.length} in the current workspace`} />
+      {docs.length ? <div className="table-scroll"><table><thead><tr><th>Document</th><th>Status</th><th>Added</th><th>Actions</th></tr></thead><tbody>{docs.map((doc) => <tr key={doc.documentId}>
+        <td>{doc.fileName}<small className="table-subline">{Math.ceil(doc.size / 1024)} KB</small></td><td><Badge tone={doc.status === 'indexed' || doc.status === 'ready' ? 'green' : doc.status === 'failed' ? 'rose' : 'indigo'}>{doc.status}</Badge>{doc.error && <small>{doc.error}</small>}</td>
+        <td>{formatDate(doc.createdAt)}</td><td><div className="row-actions">{doc.status === 'failed' && <button className="button button-secondary" onClick={async () => { await fetch(`${apiBase}/api/knowledge/documents/${doc.documentId}/reprocess`, { method: 'POST' }); await refresh() }}>Reprocess</button>}<button className="button icon-button" aria-label={`Delete ${doc.fileName}`} onClick={() => void remove(doc.documentId)}><Icon name="trash" /></button></div></td>
+      </tr>)}</tbody></table></div> : <Empty icon="book" title="No documents yet" detail="Upload an approved product guide or FAQ." />}
+    </section>
+    <section className="panel chart-card"><CardHeader title="Test knowledge search" detail="Search results include source excerpts." />
+      <form className="table-filters" onSubmit={async (event) => { event.preventDefault(); const response = await fetch(`${apiBase}/api/knowledge/search?q=${encodeURIComponent(query)}`); const data = await response.json() as { sources: typeof sources; mode: string }; setSources(data.sources); setMode(data.mode) }}>
+        <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Ask about uploaded documents" /><button className="button button-primary">Search</button>
+      </form>{mode && <p className="muted">Retrieval mode: {mode}</p>}{sources.map((source, index) => <article className="detail-section" key={index}><b>{source.title}</b><p>{source.content}</p></article>)}
+    </section>
   </>
 }
 

@@ -32,7 +32,7 @@ export function acceptedOption(reply: string, previousOptions: string[]) {
 }
 
 export function asksForProductFacts(reply: string) {
-  return /\b(?:price|pricing|cost|how much|integration|integrate|features?|capabilit(?:y|ies)|security|compliance|implementation|how (?:does|do) (?:it|you)|what (?:does|do) (?:it|you)|what is (?:it|carla))\b/i.test(reply);
+  return /\b(?:price|pricing|cost|how much|integration|integrate|features?|capabilit(?:y|ies)|security|compliance|implementation|how (?:does|do) (?:it|you)|what (?:does|do) (?:it|you)|what is (?:it|carla))\b|(?:कीमत|मूल्य|लागत|कितना|सुविधा|फीचर|एकीकरण|सुरक्षा|कैसे काम)/i.test(reply);
 }
 
 export function groundedReply(reply: string, sources: KnowledgeSource[], citedId: string | null, quote: string | null) {
