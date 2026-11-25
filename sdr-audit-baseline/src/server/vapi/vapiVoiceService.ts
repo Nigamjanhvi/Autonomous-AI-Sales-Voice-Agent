@@ -9,6 +9,7 @@ import { ApiError, isDuplicate } from "../http/errors.js";
 import type { vapiCompletionBody, vapiWebhookBody } from "../http/validation.js";
 import { callIsComplete, endCall, getCall, persistCall } from "../services/calls.js";
 import { getLeadContext } from "../tools/getLeadContext.js";
+import { assertContactAllowed } from "../services/leads.js";
 import type { Lead } from "../types.js";
 import type { z } from "zod";
 
@@ -68,6 +69,7 @@ export const startVapiVoiceCall = async ({
   customerNumber,
 }: StartVapiVoiceCallInput) => {
   const lead = await getLeadContext(leadId);
+  assertContactAllowed(lead);
   const outbound = canPlaceOutboundCall();
   if (outbound && (!lead.phoneNumber || (customerNumber && customerNumber !== lead.phoneNumber))) {
     throw new ApiError(400, "CUSTOMER_MISMATCH", "A CRM phone number is required and must match any provided customer number.");
@@ -245,6 +247,7 @@ export const handleVapiCustomLlmCompletion = async (parsedBody: VapiCustomLlmBod
       leadId: lead.id,
       outcome: call.classification.outcome,
       meetingStatus: call.summary.meetingStatus,
+      callStatus: callIsComplete(call) ? "completed" : "active",
       backendBrain: true,
       voiceLayerOnly: true,
     },

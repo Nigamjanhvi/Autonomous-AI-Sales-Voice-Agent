@@ -1,5 +1,5 @@
 import { model, Schema } from "mongoose";
-import type { CallResult, CallSummary, CallTranscriptEntry, Lead, LeadOutcomeClassification } from "../types.js";
+import type { AgentAnalysis, CallResult, CallSummary, CallTranscriptEntry, Lead, LeadOutcomeClassification, SalesFact } from "../types.js";
 
 const documentOptions = { timestamps: true, versionKey: false, minimize: false } as const;
 const nestedOptions = { _id: false, minimize: false };
@@ -10,6 +10,7 @@ export const outcomes = ["meeting_booked", "send_email", "call_back_later", "not
 export const meetingStatuses = ["booked", "not_booked", "follow_up_needed"] as const;
 export const interestLevels = ["high", "medium", "low", "none"] as const;
 
+const salesFactSchema = new Schema<SalesFact>({ kind: requiredString, evidence: requiredString }, nestedOptions);
 const leadFields = {
   id: requiredString,
   scenario: { ...requiredString, enum: leadScenarios },
@@ -24,6 +25,8 @@ const leadFields = {
   previousInteraction: { type: String, default: "" },
   workEmail: requiredString,
   phoneNumber: String,
+  salesDiscovery: { type: [salesFactSchema], default: undefined },
+  doNotContact: Boolean,
 };
 type LeadDocument = Lead & { deletedAt: Date | null; createdAt: Date };
 const leadSchema = new Schema<LeadDocument>({ ...leadFields, deletedAt: { type: Date, default: null } }, documentOptions);
@@ -54,6 +57,7 @@ export type CallDocument = Pick<CallResult, "callId" | "mode" | "agent" | "statu
   offeredSlotIds: string[];
   turnToken?: string;
   turnExpiresAt?: Date;
+  analysis?: AgentAnalysis;
 };
 const statusEventSchema = new Schema<CallResult["statusEvents"][number]>({
   status: { ...requiredString, enum: ["idle", "thinking", "agent_speaking", "lead_speaking"] }, label: requiredString,
@@ -90,6 +94,7 @@ const callSchema = new Schema<CallDocument>({
   offeredSlotIds: { type: [String], default: [] },
   turnToken: String,
   turnExpiresAt: Date,
+  analysis: Schema.Types.Mixed,
 }, documentOptions);
 callSchema.index({ callId: 1 }, { unique: true });
 callSchema.index({ startedAt: -1, callId: 1 });
@@ -173,6 +178,7 @@ const knowledgeChunkSchema = new Schema({
   documentId: requiredString, position: { type: Number, min: 0, required: true }, content: requiredString,
 }, documentOptions);
 knowledgeChunkSchema.index({ documentId: 1, position: 1 }, { unique: true });
+knowledgeChunkSchema.index({ content: "text" });
 export const KnowledgeChunkModel = model("KnowledgeChunk", knowledgeChunkSchema);
 
 const agentConfigurationSchema = new Schema({

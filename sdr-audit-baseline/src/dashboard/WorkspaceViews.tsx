@@ -235,7 +235,7 @@ export function Settings({ preferences, agent, save }: {
       <section className="panel chart-card"><CardHeader title="Qualification criteria" detail="Applies to dashboard lead status and reporting" />
         <label className="form-field">Minimum score <strong>{draft.qualificationThreshold} / 100</strong>
           <input type="range" min={5} max={100} step={5} value={draft.qualificationThreshold} onChange={(event) => update('qualificationThreshold', Number(event.target.value))} />
-          <small>Scores use recorded interest and pain points. Bookings score 100 and declines score 0.</small>
+          <small>AI calls use verified discovery and booking evidence. Predefined calls use the demo scoring rules.</small>
         </label>
         <label className="checkbox-field"><input type="checkbox" checked={draft.requirePainPoint}
           onChange={(event) => update('requirePainPoint', event.target.checked)} /> Require a recorded pain point for qualification</label>

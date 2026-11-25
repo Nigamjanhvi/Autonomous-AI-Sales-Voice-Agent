@@ -100,6 +100,11 @@ function CallDetail({ call, close }: { call: CallRecord; close: () => void }) {
       {call.summary.painPoints.length > 0 && <p><strong>Pain points</strong> · {call.summary.painPoints.join(', ')}</p>}
       {call.summary.objections.length > 0 && <p><strong>Objections</strong> · {call.summary.objections.join(', ')}</p>}
     </section>
+    {call.analysis && <section className="detail-section"><h3>Qualification · {call.analysis.qualification.score}/100</h3>
+      <p>{call.analysis.qualification.reason}</p>
+      <dl className="detail-list">{call.analysis.qualification.factors.map(({ label, points, possible, evidence }) =>
+        <div key={label}><dt>{label} · {points}/{possible}</dt><dd>{evidence || 'No confirmed evidence recorded'}</dd></div>)}</dl>
+    </section>}
     <section className="detail-section"><h3>Transcript</h3>
       <div className="messages">{call.transcript.map((entry, index) => <article className={`message message-${entry.speaker}`} key={index}>
         <Avatar name={entry.name} /><div><b>{entry.name}</b><p>{entry.message}</p></div>

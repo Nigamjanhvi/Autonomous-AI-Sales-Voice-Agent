@@ -62,10 +62,21 @@ const voiceSubmitDelayMs = 4000
 
 const toolLabels: Record<string, string> = {
   getLeadContext: 'CRM loaded',
+  getLeadDetails: 'CRM loaded',
+  updateLead: 'Discovery recorded',
+  searchKnowledgeBase: 'Knowledge searched',
   checkCalendarAvailability: 'Calendar checked',
+  getAvailableSlots: 'Calendar checked',
   bookMeeting: 'Meeting booked',
+  bookAppointment: 'Meeting booked',
+  classifyLead: 'Lead scored',
+  endCall: 'Call closed',
   saveCallSummary: 'Summary saved',
 }
+
+const successfulTools = (call: CallResult) => call.toolCalls
+  .filter(({ output }) => typeof output !== 'object' || output === null || !('error' in output))
+  .map(({ name }) => name)
 
 const startModeConfig: Record<StartMode, { title: string; description: string; agentMode: AgentMode; callMode: CallMode }> = {
   predefined: {
@@ -168,7 +179,7 @@ export function LiveCalls({ leads, agentProfile, preferences, requestedLead, onR
   const latestIntent = call?.intentDetections?.[call.intentDetections.length - 1]
   const serverSignals = useMemo(() => {
     const signals = recentTools.map((tool) => toolLabels[tool] ?? tool)
-    const checkedCalendar = call?.toolCalls.some((toolCall) => toolCall.name === 'checkCalendarAvailability')
+    const checkedCalendar = recentTools.some((name) => name === 'checkCalendarAvailability' || name === 'getAvailableSlots')
 
     if (latestIntent) {
       signals.push(`Intent: ${formatOutcome(latestIntent.intent)}`)
@@ -182,8 +193,8 @@ export function LiveCalls({ leads, agentProfile, preferences, requestedLead, onR
       )
     }
 
-    return signals.slice(-6)
-  }, [call?.toolCalls, latestIntent, recentTools])
+    return [...new Set(signals)].slice(-6)
+  }, [latestIntent, recentTools])
 
   const statusText: Record<CallStatus, string> = {
     agent_speaking: `${agentName} speaking${vapiVoiceActive ? ' via Vapi' : ''}`,
@@ -404,7 +415,7 @@ export function LiveCalls({ leads, agentProfile, preferences, requestedLead, onR
 
       const body = (await response.json()) as { call: CallResult }
       setCall(body.call)
-      setRecentTools(body.call.toolCalls.map(({ name }) => name))
+      setRecentTools(successfulTools(body.call))
       setVisibleCount(callMode === 'interactive' ? body.call.transcript.length : 0)
       setStatus(callMode === 'interactive' ? 'idle' : 'thinking')
     } catch (caughtError) {
@@ -499,7 +510,7 @@ export function LiveCalls({ leads, agentProfile, preferences, requestedLead, onR
 
       const body = (await response.json()) as { call: CallResult }
       setCall(body.call)
-      setRecentTools((previous) => [...previous, ...body.call.toolCalls.map(({ name }) => name)].slice(-6))
+      setRecentTools((previous) => [...previous, ...successfulTools(body.call)].slice(-6))
       setVisibleCount(body.call.transcript.length)
       setLeadReply('')
       setStatus('idle')

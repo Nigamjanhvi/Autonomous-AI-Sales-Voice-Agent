@@ -4,6 +4,7 @@ import { AgentConfigurationModel, AppointmentModel, LeadModel, databaseModels } 
 import calendar from "../data/calendar.mock.json" with { type: "json" };
 import leads from "../data/crm.mock.json" with { type: "json" };
 import type { Lead } from "../types.js";
+import { seedDemoKnowledge } from "../services/knowledge.js";
 
 export async function connectDatabase() {
   const uri = process.env.MONGODB_URI?.trim();
@@ -19,7 +20,10 @@ export async function connectDatabase() {
   // Build declared indexes without dropping indexes managed outside the application.
   await Promise.all(databaseModels.map(async (Model) => { await Model.createIndexes(); }));
   await AgentConfigurationModel.updateOne({ key: "default" }, { $setOnInsert: { key: "default", ...agentConfig } }, { upsert: true });
-  if (process.env.SEED_DEMO_DATA === "true") await seedDemoData();
+  if (process.env.SEED_DEMO_DATA === "true") {
+    await seedDemoData();
+    await seedDemoKnowledge();
+  }
 }
 
 async function seedDemoData() {

@@ -27,7 +27,7 @@ export const defaults: Preferences = {
   requirePainPoint: false,
 }
 
-export type CallRecord = Pick<CallResult, 'callId' | 'lead' | 'transcript' | 'summary' | 'classification'> & {
+export type CallRecord = Pick<CallResult, 'callId' | 'lead' | 'transcript' | 'summary' | 'classification' | 'analysis'> & {
   startedAt: number
   endedAt: number
   modeLabel: string
@@ -56,10 +56,11 @@ export function formatDuration(milliseconds: number) {
 }
 
 export function recordCall(call: CallResult, startedAt: number, modeLabel: string, endedManually: boolean): CallRecord {
-  const { callId, lead, transcript, summary, classification } = call
-  const output = call.toolCalls.find((tool) => tool.name === 'bookMeeting')?.output as Meeting | undefined
+  const { callId, lead, transcript, summary, classification, analysis } = call
+  const output = call.toolCalls.findLast((tool) => ['bookMeeting', 'bookAppointment'].includes(tool.name)
+    && (tool.output as Meeting | undefined)?.slotId === summary.bookedSlotId)?.output as Meeting | undefined
   return {
-    callId, lead, transcript, summary, classification, startedAt, modeLabel, endedManually,
+    callId, lead, transcript, summary, classification, analysis, startedAt, modeLabel, endedManually,
     endedAt: Date.now(),
     meeting: output?.startsAt && output.slotId === summary.bookedSlotId ? output : undefined,
   }
@@ -68,6 +69,7 @@ export function recordCall(call: CallResult, startedAt: number, modeLabel: strin
 export function sentimentFor(call: CallRecord): Sentiment {
   const replies = call.transcript.filter(({ speaker }) => speaker === 'lead').map(({ message }) => message)
   if (replies.length === 0) return 'Unrated'
+  if (call.analysis) return formatOutcome(call.analysis.sentiment) as Sentiment
   const lastReply = replies.at(-1) ?? ''
   if (/\b(not interested|not this quarter|not relevant|no thanks|remove me|stop calling)\b/i.test(lastReply)) return 'Negative'
   if (/\b(works|please send the invite|let.s book|sounds (good|relevant|interesting)|would be useful)\b/i.test(replies.join(' '))) return 'Positive'
@@ -76,6 +78,7 @@ export function sentimentFor(call: CallRecord): Sentiment {
 
 export function scoreFor(call?: CallRecord) {
   if (!call || !call.transcript.some(({ speaker }) => speaker === 'lead')) return undefined
+  if (call.analysis) return call.analysis.qualification.score
   if (call.summary.meetingStatus === 'booked') return 100
   if (['not_interested', 'disqualified'].includes(call.classification.outcome)) return 0
   const interest = { high: 80, medium: 50, low: 25, none: 0 }[call.summary.interestLevel] ?? 0

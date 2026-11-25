@@ -26,39 +26,88 @@ test("database readiness fails closed without exposing connection details", asyn
 });
 
 async function modelFixture() {
-  const payloads: Array<{ transcript?: CallResult["transcript"]; lead?: Lead; leadContext?: Lead }> = [];
+  type FixtureContext = {
+    transcript?: CallResult["transcript"];
+    lead?: Lead;
+    knownFacts?: Array<{ kind: string; evidence: string }>;
+    latestLeadMessage?: string;
+    opening?: boolean;
+    approvedSources?: Array<{ sourceId: string; title: string; content: string }>;
+  };
+  const payloads: FixtureContext[] = [];
+  const requests: Array<{ tools?: Array<{ function?: { name?: string; strict?: boolean } }>; response_format?: { type?: string }; max_completion_tokens?: number }> = [];
   const server = createServer(async (req, res) => {
     let body = "";
     for await (const chunk of req) body += chunk;
-    const { messages } = JSON.parse(body);
-    const input = JSON.parse(messages[1].content);
+    const request = JSON.parse(body);
+    const { messages } = request;
+    const input: FixtureContext = JSON.parse(messages[1].content);
     payloads.push(input);
-    const classification = messages[0].content.startsWith("You classify");
+    requests.push({ ...request, messages: undefined });
     const reply = input.latestLeadMessage ?? "";
+    if (reply === "Simulate provider failure") {
+      res.writeHead(500, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { message: "fixture-private-provider-error" } }));
+      return;
+    }
+    if (reply === "Simulate a slow provider") {
+      await new Promise((resolve) => setTimeout(resolve, 1300));
+      res.end();
+      return;
+    }
+    const previous = new Set(messages.filter((entry: { role: string }) => entry.role === "tool")
+      .map((entry: { tool_call_id: string }) => entry.tool_call_id));
     const scheduling = /book a meeting/i.test(reply);
-    const booking = /option/i.test(reply);
-    const data = classification ? {
-      intent: "interested", objectionType: "none", shouldCheckCalendar: scheduling,
-      shouldBookMeeting: reply === "Invalid fixture response" ? "false" : booking,
-      nextAgentMove: scheduling ? "offer_meeting" : "ask_discovery", reasoning: "Integration fixture.",
-    } : {
-      reply: "Thanks for sharing. What is your biggest challenge?", detectedPainPoints: [], detectedObjections: [],
-      interestLevel: "medium", recommendedToolCall: { name: "none", reason: "Integration fixture." },
-      outcome: "interested", nextBestAction: "Continue discovery.",
+    const booking = /option [12]/i.test(reply);
+    const objection = /budget is tight|haven.t approved/i.test(reply);
+    const confused = /confused|don.t understand/i.test(reply);
+    const product = /pricing|certification|security/i.test(reply);
+    const discovery = /reduce manual follow-up/i.test(reply);
+    const facts = discovery ? [
+      { kind: "need", evidence: "We need to reduce manual follow-up" },
+      { kind: "authority", evidence: "I'm the decision maker" },
+      { kind: "timing", evidence: "Next month we want to start" },
+      { kind: "budget", evidence: "We have an approved budget" },
+    ] : objection ? [{ kind: "budget", evidence: "approved the budget yet" }] : [];
+    let selected: { name: string; args: object } | undefined;
+    if (input.opening) selected = { name: "getLeadDetails", args: {} };
+    else if (booking) selected = { name: "bookAppointment", args: { option: /option 2/i.test(reply) ? 2 : 1 } };
+    else if (scheduling) selected = { name: "getAvailableSlots", args: { preferredDate: null } };
+    else if (discovery && !previous.has("fixture_updateLead")) selected = { name: "updateLead", args: { facts } };
+    else if (discovery) selected = { name: "classifyLead", args: {} };
+    else if (product) selected = { name: "searchKnowledgeBase", args: { query: reply } };
+    const selectedId = selected && "fixture_" + selected.name;
+    const callTool = Boolean(request.tools && selected && selectedId && !previous.has(selectedId));
+    const source = input.approvedSources?.find(({ title }) => title === "Approved Widget Connect Pricing");
+    const data = {
+      reply: booking ? "I booked your appointment." : confused ? "Which part would you like clarified? What do you use now?" :
+        objection ? "I understand the budget pressure. Which part of your workflow takes the most time?" :
+        product ? "It costs $9999 and includes guaranteed certification." : "Thanks for sharing. What is your biggest challenge?",
+      intent: scheduling ? "scheduling" : confused ? "confused" : product ? "product_question" : objection ? "objection" : "interested",
+      sentiment: reply === "Invalid fixture response" ? "invalid" : discovery ? "positive" : objection ? "negative" : "neutral",
+      objectionType: objection ? "budget" : "none", nextAgentMove: objection ? "handle_objection" : "ask_discovery",
+      reason: "Lead signals from the fixture.", facts,
+      sourceId: source?.sourceId ?? (product ? "fake_source" : null),
+      sourceQuote: source?.content ?? (product ? "It costs $9999." : null),
     };
+    const message = callTool ? { role: "assistant", content: null, tool_calls: [{
+      type: "function", id: selectedId, function: { name: selected!.name, arguments: JSON.stringify(selected!.args) },
+    }] } : { role: "assistant", content: JSON.stringify(data) };
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ id: "fixture", object: "chat.completion", created: 0, model: "fixture",
-      choices: [{ index: 0, message: { role: "assistant", content: JSON.stringify(data) }, finish_reason: "stop" }] }));
+      choices: [{ index: 0, message, finish_reason: callTool ? "tool_calls" : "stop" }],
+      usage: { prompt_tokens: 200, completion_tokens: 35, total_tokens: 235 } }));
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  return { url: `http://127.0.0.1:${(server.address() as { port: number }).port}/v1`,
-    payloads, close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
+  return { url: "http://127.0.0.1:" + (server.address() as { port: number }).port + "/v1",
+    payloads, requests, close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
 }
 
 async function startApi(uri: string, database: string, modelUrl: string) {
   const child = spawn(process.execPath, ["--import", "tsx", "src/server/index.ts"], {
     env: { ...process.env, MONGODB_URI: uri, MONGODB_DB: database, SEED_DEMO_DATA: "true", PORT: "0", HOST: "127.0.0.1",
       CLIENT_ORIGIN: "http://localhost:5173", AGENT_MODE: "deterministic", OPENAI_API_KEY: "test-model-placeholder", OPENAI_BASE_URL: modelUrl,
+      AGENT_TURN_TIMEOUT_MS: "900", MAX_OUTPUT_TOKENS: "500",
       MAX_INTERACTIVE_LEAD_TURNS: "6", VAPI_ALLOW_OUTBOUND_CALLS: "false", VAPI_SHARED_SECRET: "test-transport-credential" },
     stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
   });
@@ -143,6 +192,7 @@ test("MongoDB-backed API and restart persistence", { timeout: 240_000 }, async (
   });
 
   await t.test("deterministic calls and structured summaries", async () => {
+    const requestsBefore = model.requests.length;
     for (const [id, outcome] of [
       ["lead_busy", "call_back_later"], ["lead_not_interested", "not_interested"], ["lead_budget", "send_email"],
       ["lead_send_email", "send_email"], ["lead_existing_crm", "needs_human_follow_up"],
@@ -153,6 +203,7 @@ test("MongoDB-backed API and restart persistence", { timeout: 240_000 }, async (
       assert.equal(call.mode, "deterministic");
       demo = call;
     }
+    assert.equal(model.requests.length, requestsBefore);
     const record = await get<{ call: CallResult; metadata: { status: string } }>("/api/calls/" + demo.callId);
     assert.deepEqual(record.call.transcript, demo.transcript);
     assert.deepEqual(record.call.toolCalls, demo.toolCalls);
@@ -177,9 +228,9 @@ test("MongoDB-backed API and restart persistence", { timeout: 240_000 }, async (
     const unoffered = (await turn(opening, "Option 2 works", 201, spoofed)).call;
     assert.equal(unoffered.summary.meetingStatus, "not_booked");
     assert.equal(ungeneratedText(model.payloads), false);
-    assert.ok(model.payloads.every(({ lead, leadContext }) => !lead?.phoneNumber && !leadContext?.phoneNumber));
+    assert.ok(model.payloads.every(({ lead }) => !lead?.phoneNumber && !lead?.workEmail));
     const offer = (await turn(unoffered, "Can we book a meeting?")).call;
-    const slots = offer.toolCalls.find(({ name }) => name === "checkCalendarAvailability")?.output as CalendarSlot[];
+    const slots = offer.toolCalls.find(({ name }) => name === "getAvailableSlots")?.output as CalendarSlot[];
     assert.ok(slots[1]);
     await restart();
     assert.deepEqual((await get<{ call: CallResult }>("/api/calls/" + offer.callId)).call.transcript, offer.transcript);
@@ -189,6 +240,69 @@ test("MongoDB-backed API and restart persistence", { timeout: 240_000 }, async (
     assert.equal(confirmed.summary.bookedSlotId, slots[1].id);
     assert.equal(confirmed.classification.outcome, "meeting_booked");
     assert.ok((await get<{ slots: CalendarSlot[] }>("/api/calendar/availability")).slots.some(({ id }) => id === slots[0].id));
+  });
+
+  await t.test("Carla responds to confusion and objections, grounds product replies and persists discovery", async () => {
+    const { call: opening } = await post<{ call: CallResult }>("/api/calls/interactive/start", { leadId: created.id, mode: "llm" });
+    assert.ok(opening.toolCalls.some(({ name }) => name === "getLeadDetails"));
+    assert.match(opening.transcript[0].message, /Carla.*AI/);
+    assert.equal((await turn(opening, "Simulate provider failure", 502)).code, "MODEL_UNAVAILABLE");
+    assert.equal((await turn(opening, "Simulate a slow provider", 504)).code, "AGENT_TIMEOUT");
+    const { call: afterFailure } = await get<{ call: CallResult }>("/api/calls/" + opening.callId);
+    assert.deepEqual(afterFailure.transcript, opening.transcript);
+    assert.equal(afterFailure.analysis?.modelUsage.requests, (opening.analysis?.modelUsage.requests ?? 0) + 2);
+
+    const confused = (await turn(opening, "I'm confused about how to use this.")).call;
+    assert.equal(confused.intentDetections?.at(-1)?.intent, "confused");
+    assert.equal(confused.analysis?.sentiment, "neutral");
+    assert.equal(confused.transcript.at(-1)?.message.match(/\?/g)?.length, 1);
+
+    const objection = (await turn(confused, "We haven't approved the budget yet.")).call;
+    assert.equal(objection.intentDetections?.at(-1)?.objectionType, "budget");
+    assert.equal(objection.analysis?.sentiment, "negative");
+    assert.equal(objection.analysis?.qualification.factors.find(({ label }) => label === "Confirmed budget")?.points, 0);
+    assert.equal(objection.summary.meetingStatus, "not_booked");
+
+    const knowledge = "Widget Connect pricing is $2400 per year for the evaluation license.";
+    await post("/api/knowledge/documents", { title: "Approved Widget Connect Pricing", content: knowledge });
+    const grounded = (await turn(objection, "What is the Widget Connect pricing?")).call;
+    assert.equal(grounded.transcript.at(-1)?.message, knowledge);
+    assert.ok(grounded.toolCalls.some(({ name }) => name === "searchKnowledgeBase"));
+    const unsupported = (await turn(grounded, "Can you promise security certification?")).call;
+    assert.match(unsupported.transcript.at(-1)?.message ?? "", /verified answer/i);
+    assert.doesNotMatch(unsupported.transcript.at(-1)?.message ?? "", /9999/);
+
+    const discovery = (await turn(unsupported,
+      "We need to reduce manual follow-up. I'm the decision maker. Next month we want to start. We have an approved budget.")).call;
+    assert.equal(discovery.analysis?.sentiment, "positive");
+    assert.equal(discovery.analysis?.qualification.score, 85);
+    assert.equal(discovery.analysis?.qualification.status, "qualified");
+    assert.ok(discovery.toolCalls.some(({ name }) => name === "classifyLead"));
+    assert.equal((await get<{ lead: Lead }>("/api/leads/" + created.id)).lead.salesDiscovery?.length, 4);
+    assert.deepEqual((await get<{ call: CallResult }>("/api/calls/" + discovery.callId)).call.analysis, discovery.analysis);
+    const limited = (await turn(discovery, "Thanks, that's useful.")).call;
+    assert.equal(limited.statusEvents.at(-1)?.label, "Call ended");
+    assert.ok(limited.summary.recommendedNextAction);
+    await post("/api/calls/interactive/start", { leadId: created.id, mode: "llm" });
+    assert.ok(model.payloads.at(-1)?.knownFacts?.some(({ kind }) => kind === "need"));
+    const schemaRequest = model.requests.find((request) => request.response_format?.type === "json_schema" &&
+      request.max_completion_tokens === 500 && request.tools?.length === 8 &&
+      request.tools.every((tool) => tool.function?.strict));
+    assert.deepEqual(schemaRequest?.tools?.map((tool) => tool.function?.name).sort(),
+      ["bookAppointment", "classifyLead", "endCall", "getAvailableSlots", "getLeadDetails", "saveCallSummary", "searchKnowledgeBase", "updateLead"]);
+  });
+
+  await t.test("Carla respects declines and persists explicit contact opt-outs", async () => {
+    const { call } = await post<{ call: CallResult }>("/api/calls/interactive/start", { leadId: "lead_security", mode: "llm" });
+    const declined = (await turn(call, "No thanks. Please stop contacting me.")).call;
+    assert.equal(declined.classification.outcome, "not_interested");
+    assert.equal(declined.analysis?.sentiment, "negative");
+    assert.equal(declined.analysis?.qualification.score, 0);
+    assert.equal(declined.statusEvents.at(-1)?.label, "Call ended");
+    assert.ok(declined.toolCalls.some(({ name }) => name === "endCall"));
+    assert.ok(declined.toolCalls.some(({ name }) => name === "saveCallSummary"));
+    assert.equal((await get<{ lead: Lead }>("/api/leads/lead_security")).lead.doNotContact, true);
+    await post("/api/calls", { leadId: "lead_security" }, 409);
   });
 
   await t.test("concurrent reservations, no substitution, and calendar exhaustion", async () => {
@@ -233,6 +347,7 @@ test("MongoDB-backed API and restart persistence", { timeout: 240_000 }, async (
     assert.equal((await get<{ summary: CallResult["summary"] }>(direct.path)).summary.leadName, created.name);
     await request("DELETE", "/api/leads/" + created.id, 204);
     await restart();
+    assert.equal((await get<{ lead: Lead }>("/api/leads/lead_security")).lead.doNotContact, true);
     await get("/api/leads/" + created.id, 404);
     assert.equal((await get<{ leads: Lead[] }>("/api/leads")).leads.length, 8);
     assert.equal((await get<{ call: CallResult }>("/api/calls/" + confirmed.callId)).call.summary.bookedSlotId, confirmed.summary.bookedSlotId);

@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { listAppointments } from "../services/appointments.js";
 import { readSummary } from "../services/calls.js";
+import { storeKnowledgeText } from "../services/knowledge.js";
+import { z } from "zod";
 import { bookMeeting } from "../tools/bookMeeting.js";
 import { checkCalendarAvailability } from "../tools/checkCalendarAvailability.js";
 import { classifyLeadOutcome } from "../tools/classifyLeadOutcome.js";
@@ -10,6 +12,11 @@ import {
 } from "../http/validation.js";
 
 export const toolsRouter = Router();
+
+const knowledgeBody = z.strictObject({ title: z.string().trim().min(1).max(180), content: z.string().trim().min(1).max(30_000) });
+toolsRouter.post("/knowledge/documents", validated({ body: knowledgeBody }, async ({ body }, res) => {
+  res.status(201).json({ document: await storeKnowledgeText(body.title, body.content) });
+}));
 
 toolsRouter.get("/calendar/availability", validated({ query: availabilityQuery }, async ({ query }, res) => {
   res.json({ slots: await checkCalendarAvailability(query.preferredDate) });

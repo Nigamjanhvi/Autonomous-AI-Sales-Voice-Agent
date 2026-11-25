@@ -22,6 +22,24 @@ export type Lead = {
   previousInteraction: string;
   workEmail: string;
   phoneNumber?: string;
+  salesDiscovery?: SalesFact[];
+  doNotContact?: boolean;
+};
+
+export type SalesFactKind = "need" | "authority" | "timing" | "budget" | "workflow";
+export type SalesFact = { kind: SalesFactKind; evidence: string };
+export type Sentiment = "positive" | "neutral" | "negative";
+export type Qualification = {
+  score: number;
+  status: "qualified" | "developing" | "unqualified";
+  factors: Array<{ label: string; points: number; possible: number; evidence?: string }>;
+  reason: string;
+};
+export type AgentAnalysis = {
+  sentiment: Sentiment;
+  qualification: Qualification;
+  facts: SalesFact[];
+  modelUsage: { requests: number; inputTokens: number; outputTokens: number };
 };
 
 export type CalendarSlot = {
@@ -107,8 +125,11 @@ export type LeadIntentDetection = {
     | "send_follow_up"
     | "call_back_later"
     | "not_interested"
-    | "unqualified";
-  objectionType: "budget" | "timing" | "existing_tools" | "authority" | "fit" | "none";
+    | "unqualified"
+    | "confused"
+    | "product_question"
+    | "scheduling";
+  objectionType: "budget" | "timing" | "existing_tools" | "authority" | "fit" | "security" | "none";
   shouldCheckCalendar: boolean;
   shouldBookMeeting: boolean;
   nextAgentMove:
@@ -135,4 +156,5 @@ export type CallResult = {
   intentDetections?: LeadIntentDetection[];
   summary: CallSummary;
   classification: LeadOutcomeClassification;
+  analysis?: AgentAnalysis;
 };

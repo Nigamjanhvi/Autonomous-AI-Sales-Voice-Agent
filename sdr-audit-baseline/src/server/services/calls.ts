@@ -4,15 +4,15 @@ import { AppointmentModel, CallModel, ConversationModel, SummaryModel } from "..
 import type { CallDocument, CallKind, CallState } from "../db/models.js";
 import { ApiError } from "../http/errors.js";
 import { classifyLeadOutcome } from "../tools/classifyLeadOutcome.js";
-import type { AgentMode, CallResult, CallSummary, LeadOutcome, Meeting } from "../types.js";
-import { getLead, pageInfo } from "./leads.js";
+import type { AgentAnalysis, AgentMode, CallResult, CallSummary, LeadOutcome, Meeting, SalesFact } from "../types.js";
+import { getLead, pageInfo, persistSalesDiscovery } from "./leads.js";
 import type { PageInput } from "./leads.js";
 import { reserveAppointment } from "./appointments.js";
 
 const summariesPath = (id: string) => `/api/call-summaries/${id}`;
 const callSummaryId = (callId: string) => `summary_${callId}`;
 type CallFilters = PageInput & { leadId?: string; mode?: AgentMode; outcome?: LeadOutcome; kind?: CallKind; status?: CallState };
-type PersistOptions = { kind: CallKind; offeredSlotIds?: string[] } &
+type PersistOptions = { kind: CallKind; offeredSlotIds?: string[]; meeting?: Meeting; newFacts?: SalesFact[]; optedOut?: boolean } &
   ({ createOnly: true; startedAt?: Date } | { turnToken: string });
 
 export function callIsComplete(call: CallResult) {
@@ -20,12 +20,12 @@ export function callIsComplete(call: CallResult) {
 }
 
 export async function persistCall(result: CallResult, options: PersistOptions) {
-  const { callId, lead, agent, mode, statusEvents, transcript, summary, classification, intentDetections } = result;
+  const { callId, lead, agent, mode, statusEvents, transcript, summary, classification, intentDetections, analysis } = result;
   const complete = callIsComplete(result);
   const summaryId = callSummaryId(callId);
-  const toolCalls = result.toolCalls.filter((tool) => tool.name !== "saveCallSummary");
+  const toolCalls = [...result.toolCalls];
   if (complete) toolCalls.push({ name: "saveCallSummary", input: { summary }, output: { id: summaryId, path: summariesPath(summaryId) } });
-  const meeting = toolCalls.find((tool) => tool.name === "bookMeeting")?.output as Meeting | undefined;
+  const meeting = options.meeting ?? (toolCalls.find((tool) => tool.name === "bookMeeting")?.output as Meeting | undefined);
   if ((summary.meetingStatus === "booked") !== Boolean(meeting) ||
       (meeting && (!complete || meeting.leadId !== lead.id || meeting.slotId !== summary.bookedSlotId))) {
     throw new Error("Booking does not match the call.");
@@ -33,7 +33,7 @@ export async function persistCall(result: CallResult, options: PersistOptions) {
   await mongoose.connection.transaction(async (session) => {
     const fields = {
       callId, leadId: lead.id, lead, agent, mode, kind: options.kind, status: complete ? "completed" : "active",
-      outcome: classification.outcome, statusEvents, toolCalls, intentDetections,
+      outcome: classification.outcome, statusEvents, toolCalls, intentDetections, analysis,
       offeredSlotIds: options.offeredSlotIds ?? [], ...(complete ? { endedAt: new Date() } : {}),
     };
     if ("createOnly" in options) {
@@ -44,6 +44,7 @@ export async function persistCall(result: CallResult, options: PersistOptions) {
       if (!update.matchedCount) throw new ApiError(409, "CALL_BUSY", "This call turn is no longer current.");
     }
     if (meeting) await reserveAppointment(lead.id, meeting.slotId, meeting.notes, session, callId);
+    await persistSalesDiscovery(lead.id, options.newFacts ?? [], Boolean(options.optedOut), session);
     await ConversationModel.updateOne({ callId }, { $set: { leadId: lead.id, messages: transcript } }, { upsert: true, runValidators: true, session });
     await SummaryModel.updateOne({ callId }, { $set: { id: summaryId, leadId: lead.id, summary, classification } },
       { upsert: true, runValidators: true, session });
@@ -62,7 +63,7 @@ export async function getCall(callId: string) {
     const call: CallResult = {
       callId, mode: row.mode, agent: row.agent, lead: row.lead, statusEvents: row.statusEvents,
       transcript: conversation.messages, toolCalls: row.toolCalls, intentDetections: row.intentDetections,
-      summary: summary.summary, classification: summary.classification,
+      summary: summary.summary, classification: summary.classification, analysis: row.analysis,
     };
     return { call, metadata: publicMetadata(row), offeredSlotIds: row.offeredSlotIds };
   }, { readConcern: { level: "snapshot" } });
@@ -103,6 +104,10 @@ export async function withCallTurn<T>(callId: string, leadId: string, action: (t
       console.error("Could not release a call turn lease.");
     }
   }
+}
+
+export async function storeFailedTurnUsage(callId: string, turnToken: string, usage: AgentAnalysis["modelUsage"]) {
+  await CallModel.updateOne({ callId, turnToken, analysis: { $exists: true } }, { $set: { "analysis.modelUsage": usage } });
 }
 
 export async function endCall(callId: string, leadId: string, kind: "interactive" | "vapi" = "interactive") {

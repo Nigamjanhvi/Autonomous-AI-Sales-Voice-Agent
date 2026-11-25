@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
+import type { ClientSession } from "mongoose";
 import { LeadModel } from "../db/models.js";
 import { ApiError } from "../http/errors.js";
-import type { Lead } from "../types.js";
+import type { Lead, SalesFact } from "../types.js";
 
-type LeadInput = Omit<Lead, "id">;
+type LeadInput = Omit<Lead, "id" | "salesDiscovery" | "doNotContact">;
 type LeadPatch = Partial<Omit<LeadInput, "phoneNumber">> & { phoneNumber?: string | null };
 export type PageInput = { page?: number; limit?: number };
 type LeadFilters = PageInput & { search?: string; industry?: string; scenario?: Lead["scenario"] };
@@ -53,4 +54,23 @@ export async function updateLead(leadId: string, { phoneNumber, ...fields }: Lea
 export async function deleteLead(leadId: string) {
   const result = await LeadModel.updateOne({ id: leadId, deletedAt: null }, { $set: { deletedAt: new Date() } });
   if (!result.matchedCount) throw new ApiError(404, "LEAD_NOT_FOUND", "Lead not found.");
+}
+
+export function assertContactAllowed(lead: Lead) {
+  if (lead.doNotContact) throw new ApiError(409, "CONTACT_OPTED_OUT", "This lead has opted out of outreach.");
+}
+
+export async function persistSalesDiscovery(leadId: string, facts: SalesFact[], optedOut: boolean, session: ClientSession) {
+  if (!facts.length && !optedOut) return;
+  const existing = { $ifNull: ["$salesDiscovery", []] };
+  const incoming = { $literal: facts };
+  const update = await LeadModel.updateOne({ id: leadId, deletedAt: null }, [
+    { $set: {
+      ...(facts.length ? { salesDiscovery: { $slice: [{
+        $concatArrays: [{ $filter: { input: existing, cond: { $not: [{ $in: ["$$this", incoming] }] } } }, incoming],
+      }, -30] } } : {}),
+      ...(optedOut ? { doNotContact: true } : {}),
+    } },
+  ], { session, updatePipeline: true });
+  if (!update.matchedCount) throw new ApiError(404, "LEAD_NOT_FOUND", "Lead not found.");
 }

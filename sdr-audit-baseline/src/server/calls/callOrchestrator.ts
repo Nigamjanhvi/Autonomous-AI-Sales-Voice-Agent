@@ -6,6 +6,7 @@ import { prepareMeeting } from "../tools/bookMeeting.js";
 import { checkCalendarAvailability } from "../tools/checkCalendarAvailability.js";
 import { classifyLeadOutcome } from "../tools/classifyLeadOutcome.js";
 import { getLeadContext } from "../tools/getLeadContext.js";
+import { assertContactAllowed } from "../services/leads.js";
 import type {
   AgentMode,
   CallResult,
@@ -27,6 +28,7 @@ export const runCall = async (
 
   const startedAt = new Date();
   const lead = await getLeadContext(leadId);
+  assertContactAllowed(lead);
   const id = `call_${randomUUID()}`;
   const transcript: CallResult["transcript"] = [];
   const statusEvents: CallResult["statusEvents"] = [];

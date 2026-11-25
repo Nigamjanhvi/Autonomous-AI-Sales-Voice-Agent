@@ -139,14 +139,15 @@ AGENT_MODE=llm
 OPENAI_API_KEY=your_key_here
 OPENAI_MODEL=gpt-4.1-mini
 MAX_CALL_TURNS=8
-MAX_OUTPUT_TOKENS=220
+MAX_OUTPUT_TOKENS=500
+AGENT_MAX_MODEL_STEPS=4
+AGENT_MAX_CALL_TOKENS=90000
+AGENT_TURN_TIMEOUT_MS=20000
 ```
 
-In LLM mode the backend keeps **deterministic lead replies** for repeatable testing while OpenAI
-generates the agent's turns and decides when backend tools should be used. Existing backend tools
-remain the source of truth for CRM context, calendar availability, meeting booking, summaries, and
-classification. If `AGENT_MODE=llm` is set without a real API key, the backend returns a clear error
-instead of spending unexpectedly.
+Scripted mode runs a repeatable lead scenario through the same OpenAI tool workflow used by live
+interactive calls. The application validates all tool arguments and authorizes state changes.
+Scripted discovery stays inside the simulated call. Live discovery can update CRM memory.
 
 ### Demo Mode vs Interactive Mode
 
@@ -165,16 +166,30 @@ The Start Call button opens a minimal setup modal:
 
 Interactive Mode requires `OPENAI_API_KEY` and uses the same budget controls as LLM Demo Mode.
 
-## System prompt
+## Carla's prompt, memory and tools
 
-The agent's main system prompt lives in `src/server/agent/carlaSystemPrompt.ts`. It defines the
-agent's identity, value proposition, conversation flow, objection-handling rules, tool-calling
-rules, outcome labels, safety boundaries, and the optional structured-output shape.
+The prompt in `src/server/agent/carlaSystemPrompt.ts` defines Carla's discovery, objection handling,
+and call style. Each LLM turn receives recent persisted transcripts and verified CRM notes. OpenAI
+returns structured intent, sentiment, objection and discovery signals. The backend computes qualification
+and validates every action before persisting it. [OpenAI function calling documentation](https://developers.openai.com/api/docs/guides/function-calling)
 
-Deterministic mode does not use this prompt; it is the foundation for `AGENT_MODE=llm`. Tool-calling
-rules are enforced conservatively — for example, `bookMeeting` is only used after the lead explicitly
-agrees to a specific available slot, never on interest alone, and requests like "send me an email"
-or "I'll think about it" must not trigger a booking.
+Tools include `getLeadDetails`, `updateLead`, `searchKnowledgeBase`, `getAvailableSlots`,
+`bookAppointment`, `classifyLead`, `saveCallSummary`, and `endCall`. Booking requires explicit
+acceptance of a previous numbered offer, and it commits with the call result. Call details expose a
+qualification breakdown. The score allocates 30 points for business need, 20 for decision authority,
+20 for timeline, 15 for confirmed budget, and 15 for a confirmed appointment. A decline scores zero.
+
+### Approved knowledge
+
+With the backend running, add approved plain-text company facts through the API. Each text document
+is chunked and indexed in MongoDB. Carla's factual product replies use an exact verified excerpt or
+offer a human follow-up. Dashboard files still use browser-local storage. The demo seeds a small
+guide when `SEED_DEMO_DATA=true`.
+
+```powershell
+$document = @{ title = 'Approved product guide'; content = '<replace with verified company facts>' } | ConvertTo-Json
+Invoke-RestMethod http://localhost:3001/api/knowledge/documents -Method Post -ContentType 'application/json' -Body $document
+```
 
 ## Two-minute demo
 
@@ -268,9 +283,10 @@ Real outbound calls use the configured `VAPI_ASSISTANT_ID` for STT, TTS, and tra
 Development defaults to deterministic mode, so local demo work costs `$0`. LLM mode should only be
 enabled intentionally with `AGENT_MODE=llm` and a real `OPENAI_API_KEY`.
 
-Keep `MAX_CALL_TURNS` and `MAX_OUTPUT_TOKENS` low during testing. `MAX_OUTPUT_TOKENS=220` limits
-each agent response from the model, keeping calls short, predictable, and cheaper. The backend also
-caps this value at 500 even if a higher value is provided.
+`MAX_CALL_TURNS` and `MAX_INTERACTIVE_LEAD_TURNS` cap scripted and interactive turns.
+`MAX_OUTPUT_TOKENS` caps each model response and is bounded at 800. `AGENT_MAX_MODEL_STEPS` limits
+model requests per turn. `AGENT_MAX_CALL_TOKENS` budgets a whole call using reported usage and a
+conservative estimate before each request. `AGENT_TURN_TIMEOUT_MS` bounds each model turn.
 
 ## Secrets
 
