@@ -15,6 +15,21 @@ transport for speech-to-text and text-to-speech only — it never owns the conve
 - `@vapi-ai/server-sdk` / `@vapi-ai/web` for the optional voice layer
 - MongoDB Atlas with Mongoose and optional demo seed fixtures
 
+## Phase 4 browser voice setup
+
+The **Vapi Live Voice** call mode uses browser audio. Vapi transports speech and sends each Custom LLM request to Carla in Express; Carla's reasoning, tools, and MongoDB writes remain on the backend. This mode is separate from the older text-interactive mode and its optional muted Vapi playback.
+
+1. Configure MongoDB and `OPENAI_API_KEY` in the ignored `.env`. Start both servers with `npm.cmd run dev`.
+2. Make the backend reachable from Vapi over HTTPS. Set `VAPI_PUBLIC_BASE_URL` to that public base URL. A localhost URL cannot receive Vapi server requests.
+3. In Vapi, create a voice assistant with its model provider set to **Custom LLM**. Point the Custom LLM URL to `https://YOUR-BACKEND/api/vapi/chat/completions`. Keep the assistant's system prompt minimal; Carla's full prompt and tools run in Express. Set the assistant language/transcriber for English and Hindi if your selected Vapi providers support both.
+4. Create a Vapi server credential whose `Authorization` header is `Bearer YOUR_RANDOM_SECRET`. Set `VAPI_SHARED_SECRET` to that same secret in `.env`. Configure that credential for the Custom LLM URL and the assistant's server URL, `https://YOUR-BACKEND/api/vapi/webhook`. The backend checks that header. Do not expose the secret to the browser.
+5. Set `VITE_VAPI_PUBLIC_KEY` and `VITE_VAPI_ASSISTANT_ID` in `.env`. The public key is designed for browser use; never use `VAPI_API_KEY` or `OPENAI_API_KEY` with a `VITE_` prefix. Optionally set `VITE_VAPI_MAX_CALL_DURATION_SECONDS` (30–900, default 300).
+6. Open Live Calls, choose a lead, select **Vapi Live Voice**, and click **Start browser call**. Allow microphone access. The UI reports a connection only after Vapi's `call-start` event. Test a short English conversation, then a Hindi one. Verify the final transcript and summary through `GET /api/calls/:callId` and Call History. Mute/unmute, interruption, end, and permission denial are available in this screen.
+
+Outbound calling stays disabled until `VAPI_ALLOW_OUTBOUND_CALLS=true`. After browser voice is verified, use a number you own or have permission to call. Set the selected lead's real test number in MongoDB, `VAPI_PHONE_NUMBER_ID`, `VAPI_ASSISTANT_ID`, `VAPI_API_KEY`, `VAPI_SERVER_CREDENTIAL_ID`, and the public HTTPS URL. Set a low `VAPI_MAX_OUTBOUND_CALLS` and `VAPI_MAX_CALL_DURATION_SECONDS`. The outbound endpoint uses the lead's stored number; it does not trust a different number supplied in the request. `POST /api/vapi/calls` creates the provider request only when explicitly enabled. A created provider call is not evidence of a connected call; inspect provider events and the persisted call record.
+
+The automated suite uses a local MongoDB replica set and a model stub. Live Vapi browser audio, provider callbacks, and real outbound dialing require configured provider credentials and an authorized test number.
+
 ## Setup
 
 Use Node.js 22.12 or newer and MongoDB Atlas or a local MongoDB replica set. In Atlas, create a database user with `readWrite` on the application database, allow the application host's IP, and copy the driver connection URI. [Atlas connection setup](https://www.mongodb.com/docs/atlas/connect-to-database-deployment/)

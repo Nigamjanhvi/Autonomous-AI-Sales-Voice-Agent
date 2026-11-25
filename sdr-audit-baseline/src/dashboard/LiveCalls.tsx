@@ -3,13 +3,14 @@ import { type FormEvent, useEffect, useEffectEvent, useMemo, useRef, useState } 
 import { apiBase, formatDuration, formatOutcome, recordCall } from './model'
 import type { AgentProfile, CallRecord, CallResult, Lead, Preferences } from './model'
 import { Avatar, Badge, CardHeader, Empty, Icon, Overlay } from './ui'
+import { VapiLiveCall } from './VapiLiveCall'
 
 const VapiClient = (Vapi as unknown as { default?: typeof Vapi }).default ?? Vapi
 
 type CallStatus = 'agent_speaking' | 'lead_speaking' | 'thinking' | 'idle'
 type AgentMode = 'deterministic' | 'llm'
 type CallMode = 'demo' | 'interactive'
-type StartMode = 'predefined' | 'ai_scripted' | 'ai_interactive'
+type StartMode = 'predefined' | 'ai_scripted' | 'ai_interactive' | 'vapi_live'
 type VapiVoiceStatus = 'idle' | 'connecting' | 'connected' | 'speaking'
 
 type SpeechRecognitionAlternativeLike = {
@@ -97,6 +98,12 @@ const startModeConfig: Record<StartMode, { title: string; description: string; a
     agentMode: 'llm',
     callMode: 'interactive',
   },
+  vapi_live: {
+    title: 'Vapi Live Voice',
+    description: 'Two-way browser audio with backend-controlled Carla',
+    agentMode: 'llm',
+    callMode: 'interactive',
+  },
 }
 
 const friendlyError = (message: string) => {
@@ -123,6 +130,7 @@ export function LiveCalls({ leads, agentProfile, preferences, requestedLead, onR
   const [error, setError] = useState<string | null>(null)
   const [isStartModalOpen, setIsStartModalOpen] = useState(false)
   const [selectedStartMode, setSelectedStartMode] = useState<StartMode>('predefined')
+  const [showLiveVoice, setShowLiveVoice] = useState(false)
   const [activeStartMode, setActiveStartMode] = useState<StartMode | null>(null)
   const [activeCallMode, setActiveCallMode] = useState<CallMode | null>(null)
   const [leadReply, setLeadReply] = useState('')
@@ -360,6 +368,12 @@ export function LiveCalls({ leads, agentProfile, preferences, requestedLead, onR
   const beginCall = async () => {
     if (!selectedLeadId) {
       setError('Choose who Carla is calling before starting.')
+      return
+    }
+
+    if (selectedStartMode === 'vapi_live') {
+      setIsStartModalOpen(false)
+      setShowLiveVoice(true)
       return
     }
 
@@ -856,6 +870,9 @@ export function LiveCalls({ leads, agentProfile, preferences, requestedLead, onR
     call && !callInProgress ? 'Call complete' : interactive && status === 'idle' ? 'Waiting for lead' : statusText[status]
   const active = callInProgress || isLoading
   const micAvailable = Boolean(interactive && speechRecognitionSupported && !isLoading)
+
+  if (showLiveVoice && selectedLead) return <VapiLiveCall lead={selectedLead}
+    onRecorded={onRecorded} onClose={() => setShowLiveVoice(false)} />
 
   return <div className="live-layout">
     <section className="panel agent-card">

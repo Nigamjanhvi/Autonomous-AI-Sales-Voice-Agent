@@ -189,6 +189,9 @@ export const handleVapiWebhook = async ({ message }: z.infer<typeof vapiWebhookB
 };
 
 export const handleVapiCustomLlmCompletion = async (parsedBody: VapiCustomLlmBody) => {
+  if (!parsedBody.call?.id) {
+    throw new ApiError(400, "PROVIDER_CALL_REQUIRED", "A confirmed Vapi call ID is required.");
+  }
   const leadId =
     parsedBody.call?.metadata?.leadId ??
     parsedBody.metadata?.leadId ??
@@ -210,7 +213,8 @@ export const handleVapiCustomLlmCompletion = async (parsedBody: VapiCustomLlmBod
   const latestLeadReply =
     userMessageIndex >= 0 ? messageContentToText(messages[userMessageIndex]) : "";
   const prior = await startInteractiveLlmCall(leadId, { providerCallId: parsedBody.call?.id });
-  const call = latestLeadReply && !callIsComplete(prior)
+  const lastLeadReply = [...prior.transcript].reverse().find((entry) => entry.speaker === "lead")?.message;
+  const call = latestLeadReply && latestLeadReply !== lastLeadReply && !callIsComplete(prior)
     ? await runInteractiveLlmTurn({
         callId: prior.callId,
         leadId,
