@@ -6,11 +6,11 @@ This is the running project record for the Fortivex AI technical evaluation. Upd
 
 | Item | Status |
 |---|---|
-| Current phase | **Phase 2 — MongoDB persistence and backend development complete** |
-| Verification | Eight integration tests passed against a local MongoDB replica set. The suite restarts the API twice. Live Atlas and paid provider paths remain unverified. |
+| Current phase | **Phase 4 browser voice implementation complete; user-reported Vapi v3 configuration published; live provider verification pending** |
+| Verification | November 26, 2026: ten integration tests passed with a local MongoDB replica set and an OpenAI-compatible stub; TypeScript/Vite build and Oxlint passed. Vapi route/auth and synthetic webhook behavior are test-fixture checks, not a live Vapi or ngrok test. |
 | Evaluation repository | [Nigamjanhvi/Autonomous-AI-Sales-Voice-Agent](https://github.com/Nigamjanhvi/Autonomous-AI-Sales-Voice-Agent), with the application under `sdr-audit-baseline/` |
 | Approved baseline | [Dekelbo/SDR_CallingAgent at `0b2dcf53213cda4a7e2dc4b219d4532c4d303cd2`](https://github.com/Dekelbo/SDR_CallingAgent/tree/0b2dcf53213cda4a7e2dc4b219d4532c4d303cd2), audited in Phase 0 |
-| Working source | Phase 1 dashboard and Phase 2 persistence are implemented in the application folder. |
+| Working source | The dashboard, MongoDB persistence, and Carla’s backend-controlled agent run from the application folder. |
 | Reuse | The baseline has no tracked license file and declares `UNLICENSED`. Confirm reuse permission before publishing its code or assets to the evaluation repository. |
 
 ## Project purpose
@@ -23,7 +23,7 @@ Carla is an AI sales development representative. The project demonstrates a perm
 |---|---|
 | Frontend | React 19, TypeScript, Vite 8, and CSS. Responsive dashboard shell with eight views and a lazy-loaded live call console. |
 | Backend | Node.js, Express 5, TypeScript, `tsx`, dotenv, Zod, and CORS. The default API port is 3001. Vite normally serves the UI on 5173. |
-| AI | OpenAI SDK 6, Chat Completions JSON mode, configurable model with `gpt-4.1-mini` as the baseline default. Separate requests generate Carla's reply and classify lead intent. |
+| AI | OpenAI SDK 6, Chat Completions with strict function calling and structured final replies, Zod, bounded conversation context, and configurable `gpt-4.1-mini` default. |
 | Voice | Browser `SpeechRecognition` for interactive lead input, `@vapi-ai/web` for optional agent playback, and `@vapi-ai/server-sdk` for planned or real outbound calls. |
 | Storage | Mongoose 9 and MongoDB Atlas or a local replica set. JSON fixtures are optional seed inputs. The dashboard still captures browser-local call history and preferences in localStorage and files in IndexedDB. |
 | Verification | TypeScript, Vite, Oxlint, and Node's integration test runner. The suite uses a disposable replica set and a local model stub. |
@@ -59,9 +59,39 @@ sdr-audit-baseline/
 
 Phase 0 recorded 42 baseline files. Legacy files under `logs/` are outside runtime storage in Phase 2. The optional fixture inputs remain in the repo. Phase 1 imports backend types as type-only dependencies, and Phase 2 uses Zod for HTTP and model outputs.
 
+## Phase 4 — Real-time voice work
+
+The Live Calls screen now offers **Vapi Live Voice** as a separate mode. It requests microphone access, starts the Vapi web SDK with the selected lead ID, waits for the provider's `call-start` event before showing connected, displays confirmed transcript segments, measures connected duration, and supports mute, interruption, end, connection errors, and a configurable browser duration cap. Vapi Custom LLM requests continue through Express and the Phase 3 Carla orchestrator; MongoDB stores the conversation, tools, and summary. The Custom LLM adapter requires a provider call ID and skips a repeated final lead transcript. The Carla prompt now permits concise English or Hindi based on the lead's language.
+
+The owner reports Carla assistant v3 published at 100% traffic (v2 at 0%). Reported Custom LLM settings are provider `Custom LLM`, model label `gpt-4.1-mini`, base URL `https://YOUR_NGROK_DOMAIN/api/vapi`, suffix `/chat/completions`, temperature 0.5, and maximum tokens 250. The resolved route is `POST /api/vapi/chat/completions`. The separately reported Assistant Server URL is `POST https://YOUR_NGROK_DOMAIN/api/vapi/webhook`, using the `Carla Backend Auth` Bearer credential and a 20-second timeout. These dashboard settings are owner-reported and have not been independently inspected or live-tested.
+
+For local testing, ngrok must expose backend port 3001 over HTTPS because Vapi cannot reach laptop localhost. The package scripts are `npm.cmd run dev:server`, `npm.cmd run dev:client`, or combined `npm.cmd run dev`; the external ngrok CLI command is `ngrok http 3001`. Keep the same current ngrok host in `VAPI_PUBLIC_BASE_URL`, the Custom LLM base URL, and the Assistant Server URL. See [detailed setup](sdr-audit-baseline/README.md#current-vapi-setup-v3-as-reported) and the [Hinglish walkthrough](sdr-audit-baseline/docs/USER_GUIDE_HINGLISH.md).
+
+Source check: the Custom LLM route returns a regular JSON completion, not SSE streaming, and Carla's backend uses `OPENAI_MODEL` / `MAX_OUTPUT_TOKENS`; Vapi model/temperature/token fields are not forwarded. The webhook handler only finalizes known active calls on `end-of-call-report`; it does not implement call-started, status-update, or transcript event handlers. Both routes require Bearer auth via `VAPI_SHARED_SECRET`. Automated tests verify route behavior with a test credential/model stub; live browser audio, current ngrok forwarding, actual webhook delivery, and outbound dialing remain unverified. Keep outbound disabled by default.
+
+## Phase 3 — Carla autonomous agent
+
+Carla's workflow remains inside Express for scripted, interactive, and Vapi Custom LLM requests. The backend loads the lead, a bounded window of the persisted transcript, verified discovery, and the previous numbered calendar offers. OpenAI can request typed tools one at a time and returns a structured reply with intent, sentiment, objection, and evidence. The backend applies action policies, computes lead qualification, and commits the resulting call state. [OpenAI function calling documentation](https://developers.openai.com/api/docs/guides/function-calling)
+
+| Area | Phase 3 behavior |
+|---|---|
+| Conversation | Carla introduces herself as an AI, asks permission, acknowledges the lead’s concerns, and uses concise replies with at most one question. The reply handler checks for repeated text and uses a clarification prompt when appropriate. |
+| Memory | MongoDB stores the complete transcript, summary, analysis, and opt-out status. Later live calls load CRM discovery from earlier calls. Scripted evidence stays inside the simulated call. |
+| Intent and sentiment | Structured output separates interest, confusion, product questions, objections, scheduling, callback, follow-up email, decline, and disqualification. Sentiment is positive, neutral, or negative. |
+| Discovery | Only excerpts verified against the latest lead reply can be saved through `updateLead`. Discovery adds notes and preserves the canonical lead ID, contact information, and ownership fields. |
+| Qualification | Evidence rubric allocates 30 points for a business need, 20 for decision authority, 20 for a stated timeline, 15 for confirmed budget, and 15 for a confirmed appointment. A decline zeroes the score. The default backend threshold is 60. Call History shows the points and evidence. |
+| Grounding | `POST /api/knowledge/documents` accepts a title and approved plain text. MongoDB indexes the resulting chunks. The demo seeds an evaluation guide. A product answer uses a verified excerpt or offers a human follow-up. Browser-local files stay separate from this index. |
+| Scheduling and close | Availability requires an explicit scheduling request. Booking requires consent to an exact previous option. A declined or unavailable option can never be silently replaced. The backend records the outcome and next action and persists explicit opt-outs to block future calls. |
+| Failure handling | Model timeout and invalid responses produce retryable sanitized errors. Proposed CRM and booking actions stage until the transaction commits. Tool logs carry a hashed trace identifier, tool name, result code, and duration. |
+| Usage controls | `MAX_CALL_TURNS`, `MAX_INTERACTIVE_LEAD_TURNS`, `MAX_OUTPUT_TOKENS`, `AGENT_MAX_MODEL_STEPS`, `AGENT_MAX_CALL_TOKENS`, and `AGENT_TURN_TIMEOUT_MS` bound model usage and interaction duration. Active sessions record failed model attempts against their budget without appending a transcript message. Predefined mode remains available with MongoDB alone. |
+
+The integration suite covers a qualified interested lead, a confused reply, a budget objection, unsupported and grounded product questions, and a customer who declines and opts out. It also checks strict schemas, timed-out and failed model requests, exact appointment selection, and persisted memory. Run `npm.cmd test`, `npm.cmd run build`, and `npm.cmd run lint` from the application folder. Live OpenAI, hosted Atlas and live Vapi are outside the local verification. [Sales scenario tests](sdr-audit-baseline/tests/api.integration.test.ts)
+
+The Phase 3 backend adds [model orchestration](sdr-audit-baseline/src/server/agent/carlaModel.ts), [tool dispatch](sdr-audit-baseline/src/server/agent/carlaTools.ts), [call policy](sdr-audit-baseline/src/server/agent/carlaPolicy.ts), [turn processing](sdr-audit-baseline/src/server/agent/carlaTurn.ts), and [knowledge indexing](sdr-audit-baseline/src/server/services/knowledge.ts). It updates the existing prompts, call orchestration, MongoDB schema and persistence, Vapi adapter, dashboard reporting, environment example, README, and integration tests.
+
 ## Phase 2 MongoDB backend
 
-| Area | Current behavior |
+| Area | Behavior delivered in Phase 2 |
 |---|---|
 | Connection | `MONGODB_URI` configures Atlas or a local replica set. `MONGODB_DB` overrides the URI database when supplied. Startup verifies replica-set or sharded topology and creates declared indexes. `/health/db` pings MongoDB, and `/health` retains its response shape. |
 | Collections | Users, leads, calls, conversations, summaries, appointments, knowledge documents, knowledge chunks, and agent configuration. Unique indexes protect stable identifiers, summary and conversation ownership by call, and one appointment per call. Additional indexes support common list filters and chronological queries. |
@@ -69,7 +99,7 @@ Phase 0 recorded 42 baseline files. Legacy files under `logs/` are outside runti
 | Calls and summaries | Completed demos and each interactive turn store metadata, ordered messages, summary, and outcome. Interactive replies are bound to the stored lead and transcript. The API exposes history and detail, and the dashboard's manual end now finalizes the persisted call. |
 | Booking | The backend records offered slot IDs and reserves only the accepted option. Call records, summary and transcript, and any booking commit together. Availability excludes past, held, and booked slots. Exhaustion remains authoritative after restart. |
 | Validation and access | Zod guards request bodies, identifiers, list parameters, and model outputs. Error responses use sanitized messages and stable codes. Vapi Bearer authentication is configurable and required for real outbound requests. Real dialing uses the lead's stored phone number. The app is single-tenant and binds to loopback by default. |
-| Scope | The User and Knowledge schemas have no dedicated API or ingestion flow. The default Agent Configuration supplies the profile endpoint. The dashboard still reads history and appointments from the browser record of calls it performed. Legacy JSON logs are retained separately and have not been imported into MongoDB. |
+| Scope | The User schema has no dedicated API. Phase 3 added plain-text knowledge ingestion through `POST /api/knowledge/documents`; dashboard file uploads remain browser-local and do not feed that endpoint. The default Agent Configuration supplies the profile endpoint. The dashboard still reads history and appointments from the browser record of calls it performed. Legacy JSON logs are retained separately and have not been imported into MongoDB. |
 
 ### Phase 2 setup and verification
 
@@ -105,7 +135,7 @@ Paths are relative to `sdr-audit-baseline/` except for this project record.
 
 Phase 1 source includes [the navigation and shared workspace state](sdr-audit-baseline/src/App.tsx), [the live call console](sdr-audit-baseline/src/dashboard/LiveCalls.tsx), [the reporting views](sdr-audit-baseline/src/dashboard/Reporting.tsx), [the lead directory](sdr-audit-baseline/src/dashboard/Leads.tsx), [the workspace views](sdr-audit-baseline/src/dashboard/WorkspaceViews.tsx), [frontend data and reporting helpers](sdr-audit-baseline/src/dashboard/model.ts), and [shared UI components](sdr-audit-baseline/src/dashboard/ui.tsx). The project gained no package dependencies.
 
-Overview conversion is distinct CRM leads with a booked meeting divided by total CRM leads. Analytics appointment conversion is booked calls divided by calls in the selected period. The default qualification threshold is 60. Calls with high, medium, or low interest start at 80, 50, or 25, with up to 15 points for recorded pain points. Bookings score 100 and declines or disqualifications score 0. Sentiment is a keyword-based estimate from lead replies.
+Overview conversion is distinct CRM leads with a booked meeting divided by total CRM leads. Analytics appointment conversion is booked calls divided by calls in the selected period. Predefined and older call records use the Phase 1 scoring and sentiment heuristics. Phase 3 AI calls supply evidenced qualification and sentiment through their stored analysis.
 
 ### Phase 1 verification
 
@@ -125,8 +155,8 @@ Overview conversion is distinct CRM leads with a booked meeting divided by total
 ### AI (Scripted)
 
 1. The browser calls the same endpoint with `mode: "llm"`.
-2. OpenAI generates Carla's opening and replies. The lead still follows a fixture. Separate model calls classify the lead's intent, and TypeScript decides when to execute tools. The model request supplies no OpenAI function definitions.
-3. The interested fixture has a dedicated branch for scripted acceptance and booking. The backend saves the completed result. The browser replays the transcript and can use Vapi to speak Carla's lines when configured.
+2. OpenAI runs the same structured function-calling workflow used for interactive calls. The lead follows a fixture, and the backend validates every tool action.
+3. The interested fixture explicitly accepts an offered option. The backend saves the result. The browser replays the transcript and can use Vapi for playback when configured.
 
 ### AI (Interactive)
 
@@ -144,11 +174,14 @@ Overview conversion is distinct CRM leads with a booked meeting divided by total
 
 | Tool | Behavior |
 |---|---|
-| `getLeadContext` / lead list service | Queries persisted CRM leads and excludes archived leads. |
-| `checkCalendarAvailability` | Returns up to three future available slots, optionally filtered by UTC date. |
-| `bookMeeting` | Atomically checks and reserves an available slot. Orchestrated calls commit the reservation with the transcript and summary. |
-| `saveCallSummary` | Persists a structured summary and returns its ID and HTTP resource path. |
-| `classifyLeadOutcome` | Applies ordered keyword and summary rules. It prioritizes booking and can interpret both speakers' words as outcome signals. |
+| `getLeadDetails` | Supplies scoped CRM context for the current lead. |
+| `updateLead` | Stages verified discovery evidence from the latest lead reply. |
+| `searchKnowledgeBase` | Retrieves approved, indexed company passages. |
+| `getAvailableSlots` | Offers up to two future slots after an explicit scheduling request. |
+| `bookAppointment` | Stages the exact accepted slot for transactional reservation. |
+| `classifyLead` | Computes the backend qualification score and evidence breakdown. |
+| `saveCallSummary` | Queues the generated summary. The backend writes the final record and its resource path. |
+| `endCall` | Stages a permitted close. The application persists the terminal state and next action. |
 
 ## API inventory
 
@@ -166,6 +199,7 @@ Overview conversion is distinct CRM leads with a booked meeting divided by total
 | `POST /api/meetings` | Mock booking from `leadId`, `slotId`, and optional `notes` |
 | `GET /api/appointments` | Paginated appointment records with optional status, lead, and date filters |
 | `POST /api/call-summaries` | Writes a submitted summary |
+| `POST /api/knowledge/documents` | Indexes approved plain-text knowledge for Carla |
 | `GET /api/call-summaries/:summaryId` | Retrieves a persisted summary and outcome |
 | `POST /api/lead-outcomes/classify` | Classifies a transcript and optional summary |
 | `POST /api/calls` | Complete deterministic or scripted LLM demo |
@@ -206,25 +240,25 @@ Overview conversion is distinct CRM leads with a booked meeting divided by total
 | Area | Finding | Required work |
 |---|---|---|
 | Booking and calendar | Phase 2 fixed the wrong-slot and exhausted-calendar defects. Integration tests cover exact consent, concurrent reservations, fresh seed dates, and persistence across restarts. | Plan a production calendar adapter when the evaluation requires live appointments. |
-| Interactive lifecycle | Phase 2 persists backend-owned sessions and saves summaries for terminal calls, including the turn cap and manual end. | Add a durable suppression workflow if required for real outreach. |
+| Interactive lifecycle | Phase 3 adds durable lead opt-outs to backend-owned sessions and final summaries. | Verify transport hang-up and production outreach handling. |
 | API and storage | Phase 2 validates inputs and returns sanitized errors. Express is a single-tenant local workspace. | Add shared-deployment authentication, tenant scoping, rate limits, and transcript retention before public access. |
-| Model contract | Phase 2 validates reply and intent JSON. The existing rule-based classifier still mixes agent and lead messages and differs from some prompt outcome labels. | Align the classifier and prompt vocabularies and classify speaker evidence separately. |
+| Model contract | Phase 3 separates lead evidence and validates model replies and named tools. The legacy deterministic and standalone classifier retains its rule-based behavior. | Verify the hosted model on a configured account and expand scenario evaluation. |
 | Voice | Phase 2 supports authenticated provider callbacks and stored voice sessions. The outbound budget remains process-local. | Verify live audio, callback delivery, termination, and provider costs with a configured assistant before enabling real dialing. |
 | Dependencies | Findings include Express transitive `proxy-addr` and `body-parser`, dev runner `shell-quote`, Vite, and Zod. | Reconcile patched locked versions and repeat the build, lint, and demo checks. |
 | Follow-up | Real CRM writeback, calendar invites, email delivery, callback queue, and durable suppression are absent. | Add adapters only where required for the evaluation. |
 
 ## Local runbook
 
-Run from the baseline checkout in Windows PowerShell. The locked toolchain requires at least Node 22.12 on the Node 22 line. The audit used Node 25.6.1 and npm 11.9.0. PowerShell script policy blocked `npm.ps1` on the audit host, so these commands use `npm.cmd`.
+Run from the workspace root in Windows PowerShell. If the prompt already ends in `sdr-audit-baseline`, omit `Set-Location` and run `npm.cmd` directly; do not add `--prefix .\sdr-audit-baseline` from inside that folder. The locked toolchain requires at least Node 22.12 on the Node 22 line. The audit used Node 25.6.1 and npm 11.9.0. PowerShell script policy blocked `npm.ps1` on the audit host, so these commands use `npm.cmd`.
 
 ```powershell
 Set-Location .\sdr-audit-baseline
 npm.cmd ci
+npm.cmd test
 npm.cmd run build
 npm.cmd run lint
 npm.cmd audit
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
-npm.cmd test
 ```
 
 Set the database variables in the ignored `.env`, then run `npm.cmd run dev`. Open `http://localhost:5173` and select **Predefined** for the demo without AI or voice credentials. The servers can also run in separate terminals using `npm.cmd start` and `npm.cmd run dev:client -- --no-open`.
@@ -254,3 +288,6 @@ Keep secrets in ignored `.env` files. `OPENAI_API_KEY` enables AI modes. `OPENAI
 | Phase 0 · November 25, 2026 | Repository audit complete. Build, local demo, mock tools, and stub-backed AI paths verified. | Identified calendar and booking corrections as a pending backend task. |
 | Phase 1 · November 25, 2026 | Dashboard complete. Production build, lint, responsive browser checks, and stub-backed AI call workflows passed. | Move the server's persistence into MongoDB. |
 | Phase 2 | MongoDB backend, validation, and booking correctness implemented. Eight integration tests passed against a local replica set, including two API restarts. | Verify the configured Atlas and provider deployments when credentials are available. |
+| Phase 3 | Carla uses eight backend-controlled tools, persistent discovery, grounded knowledge, sentiment, and explainable qualification. Ten local integration tests cover realistic conversations and provider failures. | Verify live OpenAI and voice transport on configured test accounts. |
+| Phase 4 · November 26, 2026 | Added a separate browser Vapi mode with permission handling, provider-confirmed connection state, transcript events, mute, interruption, timeout and duration controls. Secured the Vapi webhook and Custom LLM routes with a required shared credential, and kept model/tool execution in Express. | Verify live browser audio and then an authorized outbound call with configured Vapi credentials and a test number. |
+| Post-Phase 3 verification · November 26, 2026 | User ran `npm install @vapi-ai/web @vapi-ai/server-sdk`; the second run reported both packages up to date. From the application folder, `npm.cmd test` passed 10/10, `npm.cmd run build` passed, and `npm.cmd run lint` passed. The npm install output reported 10 advisories: 1 moderate, 7 high, and 2 critical. The audit endpoint was unavailable in this environment, so the current advisory details were not independently reviewed. | Run `npm.cmd audit` where registry access works and review the affected packages before applying updates. |

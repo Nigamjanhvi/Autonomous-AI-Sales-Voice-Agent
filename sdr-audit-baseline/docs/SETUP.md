@@ -59,3 +59,50 @@ use `npm.cmd run dev:server` and `npm.cmd run dev:client`. Database readiness is
 
 Atlas credentials and API keys are external configuration. Atlas vector index setup is manual;
 without it, the app stays usable with clearly labeled MongoDB text search.
+
+## Carla Vapi v3 local testing with ngrok
+
+The owner reports Carla assistant v3 is published with 100% traffic and has configured the Custom
+LLM and webhook URLs. This state is not independently verifiable from repository files. Exact
+endpoint roles, `.env` variable meanings, the reported Vapi settings, and the tested/not-verified
+status are documented in [README.md](../README.md#current-vapi-setup-v3-as-reported) and
+[USER_GUIDE_HINGLISH.md](USER_GUIDE_HINGLISH.md).
+
+Vapi Custom LLM requests go to `POST /api/vapi/chat/completions`. The Assistant Server URL event
+handler is separate: `POST /api/vapi/webhook`, currently used for `end-of-call-report` finalization.
+Both require `Authorization: Bearer <VAPI_SHARED_SECRET>`. Use the same ngrok HTTPS domain in the
+Vapi URLs and `VAPI_PUBLIC_BASE_URL`.
+
+Run the terminals from `sdr-audit-baseline`:
+
+```powershell
+# Terminal 1: backend
+npm.cmd run dev:server
+```
+
+```powershell
+# Terminal 2: frontend
+npm.cmd run dev:client
+```
+
+```powershell
+# Terminal 3: ngrok CLI (external to npm/package.json)
+ngrok http 3001
+```
+
+Or replace the first two commands with `npm.cmd run dev` in one terminal; keep ngrok in another.
+The Vapi app needs the public HTTPS forwarding URL because it cannot reach a local loopback address.
+When the tunnel URL changes, update the Custom LLM base URL, Assistant Server URL, and
+`VAPI_PUBLIC_BASE_URL`, then restart the app.
+
+The Vapi UI reports Custom LLM model `gpt-4.1-mini`, temperature `0.5`, and maximum tokens `250`.
+The server code actually selects `OPENAI_MODEL` and `MAX_OUTPUT_TOKENS`; it does not pass through
+Vapi's model/temperature/token request settings. Set the backend model/token environment variables
+to align supported fields; backend temperature is not currently configurable. The route returns
+normal JSON, not an SSE stream.
+
+For the actual call test: open `http://localhost:5173` → **Live Calls** → select a lead → **Start
+call** → **Vapi Live Voice** → allow microphone → speak → end call → verify Call History and
+`GET /api/calls`. A Vapi/live ngrok connection and end-of-call webhook have not been verified by
+the automated integration suite. That suite exercises the backend with a test credential and model
+stub only.

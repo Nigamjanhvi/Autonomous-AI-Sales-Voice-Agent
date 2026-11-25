@@ -83,6 +83,26 @@ Call ending persists transcript, summary, qualification evidence, outcome, and s
 The dashboard's overview and analytics use saved calls and backend leads, but some reporting views
 are still client aggregation rather than a dedicated aggregate API.
 
+## Vapi Custom LLM and Assistant Server webhook
+
+These are separate routes. `POST /api/vapi/chat/completions` is the model-turn endpoint. It reads
+the latest user message, requires Vapi call ID and lead ID metadata, starts or continues Carla's
+stored call, and returns a normal JSON `chat.completion`. The backend uses `OPENAI_MODEL` and
+`MAX_OUTPUT_TOKENS`; Vapi request tuning fields are not forwarded. SSE streaming is not implemented.
+The canonical Carla prompt is constructed server side in `carlaModel.ts`.
+
+`POST /api/vapi/webhook` is the Assistant Server URL endpoint. Its handler currently acts only on
+`end-of-call-report` for a known active call, to finalize it. It does not implement server-side
+call-started, status-update, or transcript ingestion handlers. Browser `call-start`, `call-end`, and
+final transcript SDK events are handled by the frontend instead.
+
+Both Custom LLM and webhook requests require `Authorization: Bearer <VAPI_SHARED_SECRET>`. The
+backend compares this token using a timing-safe equality check. No Vapi-specific HMAC/signature
+verification was found in the current route implementation. The owner reports Carla assistant v3
+published at 100% traffic with the configured ngrok URLs; this external dashboard state cannot be
+verified from source, and the repository suite does not confirm live Vapi/ngrok requests. During
+local testing, ngrok exposes backend port 3001 over HTTPS because Vapi cannot call laptop localhost.
+
 ## Limits
 
 - One trusted local workspace; no authentication or organization membership.

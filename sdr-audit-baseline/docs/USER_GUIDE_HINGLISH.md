@@ -201,8 +201,9 @@ verify karein. Dashboard ko alag browser mein kholna backend analytics aggregati
 
 Yeh app ke **Live Calls → Vapi Live Voice** mode ke liye hai. Ismein laptop browser microphone aur
 speaker Vapi browser SDK use karte hain. Carla ka prompt/tool logic backend par rehta hai. Localhost
-backend ko Vapi ke server callbacks ke liye public HTTPS URL par reachable hona zaroori hai. Vapi
-keys/account aur external tunnel is session mein verify nahi hue.
+backend ko Vapi ke server callbacks ke liye public HTTPS URL par reachable hona zaroori hai. Owner
+reports Carla assistant v3 published hai aur Vapi URLs/credential configured hain, lekin yeh
+dashboard state ya live tunnel is source inspection se independently verify nahi hui.
 
 ### 6.1 `.env` mein kaun sa Vapi value kahan se aata hai
 
@@ -230,6 +231,34 @@ ko `VITE_` naam na dein aur browser code/source mein paste na karein.
 
 ### 6.2 Vapi dashboard assistant setup
 
+#### Aapki reported Vapi v3 configuration
+
+Yeh settings owner ne report ki hain; inhein Vapi dashboard ya successful live test se independently
+verify nahi kiya gaya:
+
+| Vapi field | Reported value |
+|---|---|
+| Assistant | Carla |
+| Published version / traffic | v3 / 100%; v2 / 0% |
+| Custom LLM provider/model | Custom LLM / `gpt-4.1-mini` |
+| Custom LLM base URL | `https://YOUR_NGROK_DOMAIN/api/vapi` |
+| Endpoint suffix | `/chat/completions` |
+| Resolved chat URL | `https://YOUR_NGROK_DOMAIN/api/vapi/chat/completions` |
+| Vapi temperature / maximum tokens | `0.5` / `250` (backend does not read these request settings) |
+| Assistant Server URL | `https://YOUR_NGROK_DOMAIN/api/vapi/webhook` |
+| Server credential / auth / timeout | `Carla Backend Auth` / Bearer / 20 seconds |
+
+Backend route `POST /api/vapi/chat/completions` uses backend `OPENAI_MODEL` and
+`MAX_OUTPUT_TOKENS`; Vapi model/temperature/max-token fields are not passed into the backend model
+request. Set `OPENAI_MODEL=gpt-4.1-mini` if you want the backend model to match the Vapi label, and
+`MAX_OUTPUT_TOKENS=250` if you want that backend token cap. Backend temperature is not currently
+settable. The endpoint returns regular JSON, not an SSE stream. `AGENT_TURN_TIMEOUT_MS` defaults to
+20 seconds, matching the reported Vapi timeout; this leaves little time for network overhead, so if
+the Vapi setting permits, use a larger upstream timeout and keep the backend timeout bounded.
+
+Reported assistant published/traffic values are configuration status only. The live Vapi request,
+current ngrok URL, and successful call have not been confirmed by repository tests.
+
 1. Vapi dashboard mein assistant banayein aur apne supported STT/transcriber aur voice provider
    select karein. Assistant language/transcriber mein English aur Hindi enable karein agar providers
    support karte hon.
@@ -244,7 +273,32 @@ ko `VITE_` naam na dein aur browser code/source mein paste na karein.
    credential ID ho sakta hai.
 5. Assistant ka prompt minimal rakhein; backend Carla prompt aur tools ka source hai. Vapi assistant
    mein alag sales policy likh kar backend se conflict na banayein.
-6. `.env` mein backend URL aur browser key/assistant ID values set karke dono servers restart karein.
+6. `.env` mein backend URL aur browser key/assistant ID values set karke app servers restart karein.
+
+### 6.2.1 Teen terminals start karein
+
+`sdr-audit-baseline` folder se:
+
+```powershell
+# Terminal 1: backend
+npm.cmd run dev:server
+```
+
+```powershell
+# Terminal 2: local frontend
+npm.cmd run dev:client
+```
+
+```powershell
+# Terminal 3: ngrok external CLI, npm script nahi
+ngrok http 3001
+```
+
+Alternative: `npm.cmd run dev` ek hi terminal mein frontend + backend chalata hai; phir doosre
+terminal mein ngrok chalayein. Frontend `http://localhost:5173` aur backend `http://localhost:3001`
+par hain. `ngrok http 3001` backend ke local port ko public HTTPS URL deta hai. Ngrok URL badle to
+`VAPI_PUBLIC_BASE_URL`, Custom LLM base URL, aur Assistant Server URL sab update karein; phir app
+restart karein.
 
 Remote Vapi ko laptop ke `http://localhost:3001` ka access nahi hota. Local demo ke liye aapko apne
 approved HTTPS tunnel/proxy se backend expose karna hoga aur uska URL `VAPI_PUBLIC_BASE_URL` mein
@@ -283,8 +337,16 @@ dena hoga. URL change hone par Vapi Custom LLM URL, webhook URL, aur `.env` teen
   server assistant ID, shared credential, valid lead phone aur explicit outbound enable chahiye.
   Testing mein `VAPI_ALLOW_OUTBOUND_CALLS=false` rakhein.
 
-Vapi live browser call iss environment mein execute/verify nahi hui. Pehli successful voice call ke
-baad hi apne setup ko working mark karein.
+### 6.5 Vapi verification status
+
+| Status label | Current evidence |
+|---|---|
+| Configured | Custom LLM URL/model/tuning values aur Bearer webhook credential owner-reported hain; dashboard independently inspect nahi hua |
+| Published | Carla v3 / 100% traffic owner-reported hai; source se verify nahi ho sakta |
+| Locally tested successfully | Integration test mein Vapi route auth aur JSON response test credential/model stub ke saath pass hue; yeh live provider test nahi |
+| Not yet verified | Current ngrok tunnel se real browser call, actual Custom LLM request, actual end-of-call webhook, Hindi voice, transcript/summary finalization |
+
+Pehli live successful voice call aur backend record check ke baad hi Vapi ko locally tested mark karein.
 
 ## 7. Useful URLs aur APIs
 

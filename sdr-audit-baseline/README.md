@@ -22,20 +22,92 @@ Vapi browser voice credential mapping and troubleshooting, read
 [`docs/USER_GUIDE_HINGLISH.md`](docs/USER_GUIDE_HINGLISH.md). The guide distinguishes configured
 features from external integrations that still need live verification.
 
-## Phase 4 browser voice setup
+## Current Vapi setup (v3, as reported)
 
-The **Vapi Live Voice** call mode uses browser audio. Vapi transports speech and sends each Custom LLM request to Carla in Express; Carla's reasoning, tools, and MongoDB writes remain on the backend. This mode is separate from the older text-interactive mode and its optional muted Vapi playback.
+The owner reports that Carla assistant **v3 is published with 100% traffic**. The Vapi dashboard and
+ngrok account were not inspected by this code review, so this is recorded as user-reported
+configuration, not independently verified. The browser uses Vapi for audio; Carla's backend owns
+conversation policy, tool calls, and MongoDB writes.
 
-1. Configure MongoDB and `OPENAI_API_KEY` in the ignored `.env`. Start both servers with `npm.cmd run dev`.
-2. Make the backend reachable from Vapi over HTTPS. Set `VAPI_PUBLIC_BASE_URL` to that public base URL. A localhost URL cannot receive Vapi server requests.
-3. In Vapi, create a voice assistant with its model provider set to **Custom LLM**. Point the Custom LLM URL to `https://YOUR-BACKEND/api/vapi/chat/completions`. Keep the assistant's system prompt minimal; Carla's full prompt and tools run in Express. Set the assistant language/transcriber for English and Hindi if your selected Vapi providers support both.
-4. Create a Vapi server credential whose `Authorization` header is `Bearer YOUR_RANDOM_SECRET`. Set `VAPI_SHARED_SECRET` to that same secret in `.env`. Configure that credential for the Custom LLM URL and the assistant's server URL, `https://YOUR-BACKEND/api/vapi/webhook`. The backend checks that header. Do not expose the secret to the browser.
-5. Set `VITE_VAPI_PUBLIC_KEY` and `VITE_VAPI_ASSISTANT_ID` in `.env`. The public key is designed for browser use; never use `VAPI_API_KEY` or `OPENAI_API_KEY` with a `VITE_` prefix. Optionally set `VITE_VAPI_MAX_CALL_DURATION_SECONDS` (30–900, default 300).
-6. Open Live Calls, choose a lead, select **Vapi Live Voice**, and click **Start browser call**. Allow microphone access. The UI reports a connection only after Vapi's `call-start` event. Test a short English conversation, then a Hindi one. Verify the final transcript and summary through `GET /api/calls/:callId` and Call History. Mute/unmute, interruption, end, and permission denial are available in this screen.
+### Custom LLM endpoint
 
-Outbound calling stays disabled until `VAPI_ALLOW_OUTBOUND_CALLS=true`. After browser voice is verified, use a number you own or have permission to call. Set the selected lead's real test number in MongoDB, `VAPI_PHONE_NUMBER_ID`, `VAPI_ASSISTANT_ID`, `VAPI_API_KEY`, `VAPI_SERVER_CREDENTIAL_ID`, and the public HTTPS URL. Set a low `VAPI_MAX_OUTBOUND_CALLS` and `VAPI_MAX_CALL_DURATION_SECONDS`. The outbound endpoint uses the lead's stored number; it does not trust a different number supplied in the request. `POST /api/vapi/calls` creates the provider request only when explicitly enabled. A created provider call is not evidence of a connected call; inspect provider events and the persisted call record.
+Reported Vapi values: Provider `Custom LLM`, model label `gpt-4.1-mini`, base URL
+`https://YOUR_NGROK_DOMAIN/api/vapi`, endpoint suffix `/chat/completions`, temperature `0.5`, and
+maximum tokens `250`. The resolved endpoint must be:
 
-The automated suite uses a local MongoDB replica set and a model stub. Live Vapi browser audio, provider callbacks, and real outbound dialing require configured provider credentials and an authorized test number.
+```text
+https://YOUR_NGROK_DOMAIN/api/vapi/chat/completions
+```
+
+The application route is `POST /api/vapi/chat/completions`. It expects call ID and lead ID metadata
+and returns a normal JSON chat-completion response. The backend does not implement SSE streaming.
+The backend LLM request uses `.env` `OPENAI_MODEL` and `MAX_OUTPUT_TOKENS`; it does not forward the
+Vapi request's model, temperature, or token limit. Set `OPENAI_MODEL=gpt-4.1-mini` and, if desired,
+`MAX_OUTPUT_TOKENS=250` in the backend environment to align model/token settings. Temperature is
+not currently configurable in the backend request. Do not assume the Vapi UI's `0.5` is applied.
+
+### Assistant Server URL webhook
+
+Separately, the reported Vapi Assistant Server URL is:
+
+```text
+https://YOUR_NGROK_DOMAIN/api/vapi/webhook
+```
+
+Use the `Carla Backend Auth` Bearer credential. The route is `POST /api/vapi/webhook`; its current
+backend handler acts on `end-of-call-report` to finalize an active call. It does not implement
+server-side call-started, status-update, or transcript event processing. Browser SDK events are
+handled separately in the frontend. The webhook supports call lifecycle finalization; it is not the
+Custom LLM turn endpoint.
+
+### Local ngrok testing
+
+Vapi's servers cannot call a laptop's `localhost`, so ngrok must forward public HTTPS traffic to the
+local Express port. After installing/authenticating the ngrok CLI, use three terminals from
+`sdr-audit-baseline`:
+
+```powershell
+# Terminal 1: Express backend
+npm.cmd run dev:server
+```
+
+```powershell
+# Terminal 2: Vite frontend
+npm.cmd run dev:client
+```
+
+```powershell
+# Terminal 3: ngrok (external CLI command, not an npm script)
+ngrok http 3001
+```
+
+Alternatively, run frontend and backend together in Terminal 1 with `npm.cmd run dev`, and run only
+ngrok in Terminal 2. Copy the HTTPS forwarding host printed by ngrok into `VAPI_PUBLIC_BASE_URL`,
+then set the Vapi Custom LLM base URL and Assistant Server URL as above. If the ngrok host changes,
+update all three locations and restart the app so `.env` is reloaded. Keep the secret credential
+value only in `.env` and Vapi's credential store; do not paste it into source code, logs, or docs.
+
+### Test the browser voice flow
+
+1. Confirm `http://localhost:3001/health/db` returns database status `up`.
+2. Start the local frontend and backend, then the ngrok tunnel.
+3. Open `http://localhost:5173` → **Live Calls** → choose a lead → **Start call** → **Vapi Live Voice**.
+4. Allow microphone access. Wait for the connected/listening state, then speak a short test request.
+5. End the call. Check **Call History** and `GET /api/calls`, then inspect a record with
+   `GET /api/calls/:callId`.
+
+### Configuration and verification status
+
+| Item | Status |
+|---|---|
+| Assistant v3, 100% traffic allocation | Configured/published per owner report; dashboard not independently inspected |
+| Custom LLM and webhook URLs / Bearer credential | Configured per owner report; no live request verified in this session |
+| Backend routes and UI integration | Present in source; automated route test uses a test credential/model stub |
+| Live browser voice via current ngrok URL | Not yet verified from this session |
+| Real end-of-call webhook receipt and summary finalization | Not yet verified against Vapi |
+| Real PSTN outbound call | Not tested; keep `VAPI_ALLOW_OUTBOUND_CALLS=false` during browser testing |
+
+Troubleshooting and environment variable meanings are in [`docs/USER_GUIDE_HINGLISH.md`](docs/USER_GUIDE_HINGLISH.md).
 
 ## Setup
 
@@ -291,13 +363,19 @@ VAPI_MAX_CALL_DURATION_SECONDS=300
 - `VAPI_MAX_OUTBOUND_CALLS=2` limits real Vapi outbound calls per server process.
 - `VAPI_MAX_CALL_DURATION_SECONDS=300` caps the outbound call duration.
 
-When `VAPI_SHARED_SECRET` is configured, send it as a Bearer credential on provider callbacks and the turn bridge. Real outbound requests also require it. Configure the corresponding credential in Vapi and optionally set `VAPI_SERVER_CREDENTIAL_ID` when supplying a webhook URL override. Real calls use the stored lead `phoneNumber`. Any request number must match the stored value.
+`POST /api/vapi/chat/completions`, `/api/vapi/webhook`, and `/api/vapi/turn` require the
+`Authorization: Bearer <VAPI_SHARED_SECRET>` credential; if `VAPI_SHARED_SECRET` is missing these
+routes return a configuration error. Configure the matching Bearer credential in Vapi. The
+`VAPI_SERVER_CREDENTIAL_ID` is used when backend-created outbound calls attach a webhook override.
+Real outbound requests use the stored lead `phoneNumber`; a request number must match it.
 
 The Live Call Demo, Demo Mode, and Interactive Text Mode remain fully usable without Vapi.
 
-`POST /api/vapi/chat/completions` is the preferred Vapi Custom LLM endpoint. Configure the Vapi
-assistant model as a custom / OpenAI-compatible server pointing at
-`{VAPI_PUBLIC_BASE_URL}/api/vapi/chat/completions`. Vapi requests must include
+`POST /api/vapi/chat/completions` is the Vapi Custom LLM endpoint. Its response is a JSON
+`chat.completion`; SSE streaming is not implemented. Configure the Vapi assistant model as a custom
+/ OpenAI-compatible server pointing at
+`{VAPI_PUBLIC_BASE_URL}/api/vapi/chat/completions`. The backend uses `OPENAI_MODEL` and
+`MAX_OUTPUT_TOKENS`, not Vapi's request model/temperature/token fields. Vapi requests must include
 `call.metadata.leadId` or `metadata.leadId` so the backend can load the correct mock CRM lead and
 keep the existing orchestration as the agent brain.
 

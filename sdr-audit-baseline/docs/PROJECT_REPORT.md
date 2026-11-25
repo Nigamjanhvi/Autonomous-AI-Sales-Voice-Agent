@@ -34,8 +34,23 @@ Set `MONGODB_URI` and `MONGODB_DB`. For semantic search also set a real backend 
 `RAG_EMBEDDINGS_ENABLED=true`, and create the `knowledge_chunks_vector` Atlas index described in
 `ARCHITECTURE.md`. This session did not verify an Atlas index or real semantic retrieval. Current
 default is MongoDB text search. This is a single local workspace, not authenticated multi-tenancy.
-The app keeps appointments internal and does not send calendar invites. Real Vapi voice was not
-tested; credentials and reachable HTTPS callbacks are required.
+The app keeps appointments internal and does not send calendar invites. Live Vapi voice was not
+tested by the repository integration suite; provider credentials and reachable HTTPS callbacks are
+required.
+
+## Latest Vapi state (owner-reported)
+
+The owner reports Carla assistant v3 is published with 100% traffic allocation and has configured
+Custom LLM (reported base URL `https://YOUR_NGROK_DOMAIN/api/vapi`, suffix `/chat/completions`) and
+Assistant Server webhook (`https://YOUR_NGROK_DOMAIN/api/vapi/webhook`) using the Bearer credential
+named `Carla Backend Auth`. This Vapi dashboard state and actual ngrok domain were not independently
+inspected, and no live Vapi request was run. The automated Vapi integration test uses a test Bearer
+token and local model fixture only.
+
+The code's chat endpoint is non-streaming JSON. It does not forward Vapi's reported temperature or
+token settings; the backend uses `OPENAI_MODEL` and `MAX_OUTPUT_TOKENS`. The webhook route currently
+finalizes only `end-of-call-report` events. See README's Vapi setup section and TESTING.md for the
+local three-terminal instructions, current status labels, and troubleshooting.
 
 ## Test status and commands
 
