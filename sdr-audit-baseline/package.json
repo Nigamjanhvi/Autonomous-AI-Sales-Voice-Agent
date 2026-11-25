@@ -16,6 +16,7 @@
     "build": "tsc -b && vite build",
     "start": "tsx src/server/index.ts",
     "lint": "oxlint",
+    "test": "node --import tsx --test tests/api.integration.test.ts",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -24,6 +25,7 @@
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "mongoose": "^9.13.1",
     "openai": "^6.45.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

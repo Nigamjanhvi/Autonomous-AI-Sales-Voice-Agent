@@ -1,11 +1,11 @@
+import { randomUUID } from "node:crypto";
 import { agentConfig } from "../config/agent.config.js";
 import { runLlmCall } from "../agent/llmCallOrchestrator.js";
-import { writeJsonFile } from "../storage/jsonStore.js";
-import { bookMeeting } from "../tools/bookMeeting.js";
+import { persistCall } from "../services/calls.js";
+import { prepareMeeting } from "../tools/bookMeeting.js";
 import { checkCalendarAvailability } from "../tools/checkCalendarAvailability.js";
 import { classifyLeadOutcome } from "../tools/classifyLeadOutcome.js";
 import { getLeadContext } from "../tools/getLeadContext.js";
-import { saveCallSummary } from "../tools/saveCallSummary.js";
 import type {
   AgentMode,
   CallResult,
@@ -15,24 +15,19 @@ import type {
   Lead,
 } from "../types.js";
 
-const getAgentMode = (requestedMode?: AgentMode): AgentMode =>
-  requestedMode ?? (process.env.AGENT_MODE as AgentMode | undefined) ?? "deterministic";
-
-const callId = (leadId: string) =>
-  `${leadId}-${new Date().toISOString().replaceAll(/[:.]/g, "-")}`;
-
 export const runCall = async (
   leadId: string,
   requestedMode?: AgentMode,
 ): Promise<CallResult> => {
-  const mode = getAgentMode(requestedMode);
+  const mode = requestedMode ?? (process.env.AGENT_MODE === "llm" ? "llm" : "deterministic");
 
   if (mode === "llm") {
     return runLlmCall(leadId);
   }
 
+  const startedAt = new Date();
   const lead = await getLeadContext(leadId);
-  const id = callId(lead.id);
+  const id = `call_${randomUUID()}`;
   const transcript: CallResult["transcript"] = [];
   const statusEvents: CallResult["statusEvents"] = [];
   const toolCalls: CallToolCall[] = [
@@ -74,12 +69,6 @@ export const runCall = async (
   const classification = classifyLeadOutcome(transcriptText, summary);
 
   setStatus("thinking", "Saving call summary");
-  const savedSummary = await saveCallSummary(summary);
-  toolCalls.push({
-    name: "saveCallSummary",
-    input: { summary },
-    output: { id: savedSummary.id, path: savedSummary.path },
-  });
 
   const result: CallResult = {
     callId: id,
@@ -97,9 +86,7 @@ export const runCall = async (
     classification,
   };
 
-  await writeJsonFile(result, "logs", "calls", `${id}.json`);
-
-  return result;
+  return persistCall(result, { kind: "demo", startedAt, createOnly: true });
 };
 
 type DeterministicContext = {
@@ -154,12 +141,10 @@ const runInterestedCall = async ({
     "Yes, I have a few minutes. We downloaded your guide because outbound follow-up is getting hard to keep consistent.",
   );
   agentSays(
-    `That makes sense. For a ${lead.companySize} company like ${lead.company}, follow-up can get messy once reps are moving between ${lead.currentTools.join(
-      " and ",
-    )}. Where does the process break down most often?`,
+    `That makes sense. For a ${lead.companySize} company like ${lead.company}, follow-up can get messy once reps are moving between ${lead.currentTools.join(" and ") || "sales tools"}. Where does the process break down most often?`,
   );
   leadSays(
-    "Our reps repeat the same follow-ups in HubSpot and Outreach, and sometimes the best leads wait too long after they engage.",
+    `Our reps repeat the same follow-ups across ${lead.currentTools.join(" and ") || "our sales tools"}, and sometimes the best leads wait too long after they engage.`,
   );
   agentSays(
     "That is exactly the workflow this is built around. The AI agent can watch for high-intent activity, prepare the next step, and help reps act faster without replacing the CRM or the sales engagement tool.",
@@ -168,9 +153,7 @@ const runInterestedCall = async ({
     "That sounds relevant, but I would need to understand how it fits with our existing stack. We are not looking to rip out tools.",
   );
   agentSays(
-    `Completely fair. The goal would be to connect around ${lead.discussionTopic.toLowerCase()}, not replace ${lead.currentTools.join(
-      " or ",
-    )}. A short working session could map the exact handoff from lead signal to rep action. Would that be useful?`,
+    `Completely fair. The goal would be to connect around ${lead.discussionTopic.toLowerCase()}, not replace ${lead.currentTools.join(" or ") || "your current tools"}. A short working session could map the exact handoff from lead signal to rep action. Would that be useful?`,
   );
   leadSays(
     "Yes, a short meeting would be useful if it focuses on our current workflow and not a generic pitch.",
@@ -203,7 +186,7 @@ const runInterestedCall = async ({
   leadSays("Yes, that works. Please send the invite.");
 
   setStatus("thinking", "Booking meeting");
-  const meeting = await bookMeeting(
+  const meeting = await prepareMeeting(
     lead.id,
     slot.id,
     "Qualified deterministic call: interested in AI outbound workflow automation.",
@@ -221,7 +204,7 @@ const runInterestedCall = async ({
   return {
     ...summaryBase(lead),
     painPoints: [
-      "Manual follow-ups across HubSpot and Outreach",
+      `Manual follow-ups across ${lead.currentTools.join(" and ") || "sales tools"}`,
       "Delayed response to high-intent leads",
       "Needs workflow fit with existing tools",
     ],
@@ -231,7 +214,7 @@ const runInterestedCall = async ({
     bookedSlotId: meeting.slotId,
     recommendedNextAction: "Send calendar invite and prepare sales rep with CRM context.",
     shortSummaryForSales:
-      "Sarah at Growthly booked a workflow-focused meeting to discuss AI agents for faster high-intent lead follow-up across HubSpot and Outreach.",
+      `${lead.name} at ${lead.company} booked a workflow-focused meeting to discuss ${lead.discussionTopic.toLowerCase()}.`,
   };
 };
 
@@ -304,7 +287,7 @@ const runSendEmailCall = ({ lead, agentSays, leadSays }: DeterministicContext): 
   agentSays(
     `Of course. To make it useful, should I focus on ${lead.discussionTopic} and how AI agents connect with ${lead.currentTools.join(
       " and ",
-    )}?`,
+    ) || "your sales tools"}?`,
   );
   leadSays("Yes, that would be the most relevant.");
   agentSays(`Perfect. I will send a concise note to ${lead.workEmail}. Thanks for your time.`);
@@ -324,7 +307,7 @@ const runSendEmailCall = ({ lead, agentSays, leadSays }: DeterministicContext): 
 const runExistingCrmCall = ({ lead, agentSays, leadSays }: DeterministicContext): CallSummary => {
   leadSays("We already have a CRM and automation stack in place.");
   agentSays(
-    `That makes sense. The goal would not be to replace ${lead.currentTools[0]}; the goal is to connect customer data, GTM workflows, and AI agents across the tools you already use. Where does work still feel fragmented?`,
+    `That makes sense. The goal would not be to replace ${lead.currentTools[0] || "your CRM"}; the goal is to connect customer data, GTM workflows, and AI agents across the tools you already use. Where does work still feel fragmented?`,
   );
   leadSays("Handoffs across tools are still messy.");
   agentSays(

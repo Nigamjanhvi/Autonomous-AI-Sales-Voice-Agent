@@ -6,11 +6,11 @@ This is the running project record for the Fortivex AI technical evaluation. Upd
 
 | Item | Status |
 |---|---|
-| Current phase | **Phase 1 — Professional AI Sales Operations Dashboard complete**, November 25, 2026 |
-| Open implementation item | Calendar and booking correctness remains pending. Phase 1 focuses on the frontend dashboard. |
-| Evaluation repository | [Nigamjanhvi/Autonomous-AI-Sales-Voice-Agent](https://github.com/Nigamjanhvi/Autonomous-AI-Sales-Voice-Agent), cloned at the workspace root with no commits at audit time |
-| Approved baseline | [Dekelbo/SDR_CallingAgent at `0b2dcf53213cda4a7e2dc4b219d4532c4d303cd2`](https://github.com/Dekelbo/SDR_CallingAgent/tree/0b2dcf53213cda4a7e2dc4b219d4532c4d303cd2), checked out separately in `sdr-audit-baseline/` |
-| Working source | The dashboard is implemented in the approved baseline checkout. Phase 1 keeps the existing Express routes and contracts. |
+| Current phase | **Phase 2 — MongoDB persistence and backend development complete** |
+| Verification | Eight integration tests passed against a local MongoDB replica set. The suite restarts the API twice. Live Atlas and paid provider paths remain unverified. |
+| Evaluation repository | [Nigamjanhvi/Autonomous-AI-Sales-Voice-Agent](https://github.com/Nigamjanhvi/Autonomous-AI-Sales-Voice-Agent), with the application under `sdr-audit-baseline/` |
+| Approved baseline | [Dekelbo/SDR_CallingAgent at `0b2dcf53213cda4a7e2dc4b219d4532c4d303cd2`](https://github.com/Dekelbo/SDR_CallingAgent/tree/0b2dcf53213cda4a7e2dc4b219d4532c4d303cd2), audited in Phase 0 |
+| Working source | Phase 1 dashboard and Phase 2 persistence are implemented in the application folder. |
 | Reuse | The baseline has no tracked license file and declares `UNLICENSED`. Confirm reuse permission before publishing its code or assets to the evaluation repository. |
 
 ## Project purpose
@@ -22,11 +22,11 @@ Carla is an AI sales development representative. The project demonstrates a perm
 | Layer | Current implementation |
 |---|---|
 | Frontend | React 19, TypeScript, Vite 8, and CSS. Responsive dashboard shell with eight views and a lazy-loaded live call console. |
-| Backend | Node.js, Express 5, TypeScript, `tsx`, dotenv, and CORS. The default API port is 3001. Vite normally serves the UI on 5173. |
+| Backend | Node.js, Express 5, TypeScript, `tsx`, dotenv, Zod, and CORS. The default API port is 3001. Vite normally serves the UI on 5173. |
 | AI | OpenAI SDK 6, Chat Completions JSON mode, configurable model with `gpt-4.1-mini` as the baseline default. Separate requests generate Carla's reply and classify lead intent. |
 | Voice | Browser `SpeechRecognition` for interactive lead input, `@vapi-ai/web` for optional agent playback, and `@vapi-ai/server-sdk` for planned or real outbound calls. |
-| Storage | JSON seed fixtures in `src/server/data/` and file-backed server state under ignored `logs/`. The dashboard captures browser-local call records and preferences in localStorage and document files in IndexedDB. |
-| Verification | TypeScript project references, Vite build, Oxlint, and npm lockfile. No tracked test suite or CI workflow exists. |
+| Storage | Mongoose 9 and MongoDB Atlas or a local replica set. JSON fixtures are optional seed inputs. The dashboard still captures browser-local call history and preferences in localStorage and files in IndexedDB. |
+| Verification | TypeScript, Vite, Oxlint, and Node's integration test runner. The suite uses a disposable replica set and a local model stub. |
 
 The browser fetches the agent profile and CRM leads from Express. Express routes delegate to deterministic or LLM orchestration. The orchestrators and direct HTTP endpoints share backend tools for CRM lookup, calendar checks, mock bookings, summary persistence, and classification. The frontend reads `VITE_API_BASE_URL` and defaults to `http://localhost:3001`. Set it to `/` for same-origin API routing. Vite builds browser assets and Express starts separately from TypeScript.
 
@@ -43,18 +43,52 @@ sdr-audit-baseline/
     ├── dashboard/             Dashboard views, live console, data model, reusable UI
     ├── assets/                Starter React/Vite assets
     └── server/
-        ├── index.ts, types.ts
+        ├── app.ts, index.ts, types.ts
         ├── agent/             Carla's prompt and LLM orchestration
         ├── calls/             Mode selection and deterministic scenarios
         ├── config/            Carla's profile
-        ├── data/              Eight mock leads and five calendar slots
-        ├── routes/            Call, tool, and Vapi endpoints
-        ├── storage/           JSON file handling
+        ├── controllers/       Lead HTTP controllers
+        ├── data/              Optional demo seed inputs
+        ├── db/                MongoDB connection, schemas, indexes, demo seeding
+        ├── http/              Zod request validation and error mapping
+        ├── routes/            Lead, call, tool, and Vapi endpoints
+        ├── services/          Lead, appointment, and call persistence
         ├── tools/             Lead, calendar, booking, summary, outcome
         └── vapi/              Voice service and provider adapters
 ```
 
-Runtime files include `logs/calendar-state.json`, `logs/calls/*.json`, and `logs/summaries/*.json`. The audited commit tracks 42 files. Its three `.gitkeep` placeholders are redundant, and `src/assets/*` and `public/icons.svg` have no application references. Phase 1 imports existing backend types into the frontend as type-only dependencies and replaces the previous call stylesheet. Zod has no application imports, while both Vapi SDKs have call sites.
+Phase 0 recorded 42 baseline files. Legacy files under `logs/` are outside runtime storage in Phase 2. The optional fixture inputs remain in the repo. Phase 1 imports backend types as type-only dependencies, and Phase 2 uses Zod for HTTP and model outputs.
+
+## Phase 2 MongoDB backend
+
+| Area | Current behavior |
+|---|---|
+| Connection | `MONGODB_URI` configures Atlas or a local replica set. `MONGODB_DB` overrides the URI database when supplied. Startup verifies replica-set or sharded topology and creates declared indexes. `/health/db` pings MongoDB, and `/health` retains its response shape. |
+| Collections | Users, leads, calls, conversations, summaries, appointments, knowledge documents, knowledge chunks, and agent configuration. Unique indexes protect stable identifiers, summary and conversation ownership by call, and one appointment per call. Additional indexes support common list filters and chronological queries. |
+| Leads | CRUD uses server-generated IDs and soft deletion, so historical call snapshots remain available. The original unparameterized list retains `{ leads }`. Filtered and paginated requests include metadata. |
+| Calls and summaries | Completed demos and each interactive turn store metadata, ordered messages, summary, and outcome. Interactive replies are bound to the stored lead and transcript. The API exposes history and detail, and the dashboard's manual end now finalizes the persisted call. |
+| Booking | The backend records offered slot IDs and reserves only the accepted option. Call records, summary and transcript, and any booking commit together. Availability excludes past, held, and booked slots. Exhaustion remains authoritative after restart. |
+| Validation and access | Zod guards request bodies, identifiers, list parameters, and model outputs. Error responses use sanitized messages and stable codes. Vapi Bearer authentication is configurable and required for real outbound requests. Real dialing uses the lead's stored phone number. The app is single-tenant and binds to loopback by default. |
+| Scope | The User and Knowledge schemas have no dedicated API or ingestion flow. The default Agent Configuration supplies the profile endpoint. The dashboard still reads history and appointments from the browser record of calls it performed. Legacy JSON logs are retained separately and have not been imported into MongoDB. |
+
+### Phase 2 setup and verification
+
+From the workspace root, enter `sdr-audit-baseline/`, run `npm.cmd ci`, then copy `.env.example` to the ignored `.env` if one does not exist. Configure `MONGODB_URI`, the optional `MONGODB_DB` database override, and `SEED_DEMO_DATA`. The demo seed writes the initial leads and forward-dated slots once. Set `CLIENT_ORIGIN` if using a different frontend origin. Start with `npm.cmd run dev` and check `GET /health/db`. [Local replica-set and Atlas instructions](sdr-audit-baseline/README.md) · [Atlas connection setup](https://www.mongodb.com/docs/atlas/connect-to-database-deployment/)
+
+`npm.cmd test` starts a disposable local replica set when `mongod` is on PATH. Use `MONGOD_BINARY` for a custom executable path or `MONGODB_TEST_URI` for a dedicated external test deployment. The suite verifies database readiness, lead CRUD and pagination, all eight deterministic scenarios, persisted interactive turns and provider session binding, Vapi dry-run and webhook behavior, concurrent reservations, exact slot selection, and persistence across two API restarts. OpenAI uses a local stub for the tests. [Integration tests](sdr-audit-baseline/tests/api.integration.test.ts)
+
+Before exposing the backend to shared users, add authentication and derive tenant scope from the authenticated identity in every repository query. Live Atlas validation requires a configured cluster connection, and live audio and dialing require a configured provider.
+
+### Phase 2 changed files
+
+Paths are relative to `sdr-audit-baseline/` except for this project record.
+
+- **Configuration and setup** — `.env.example`, `.gitignore`, `README.md`, `package.json`, `package-lock.json`, and `tsconfig.node.json`.
+- **MongoDB and services** — `src/server/db/connection.ts`, `src/server/db/models.ts`, `src/server/services/leads.ts`, `src/server/services/calls.ts`, and `src/server/services/appointments.ts`. Replaced `src/server/storage/jsonStore.ts`.
+- **Express and contracts** — `src/server/app.ts`, `src/server/index.ts`, `src/server/http/errors.ts`, `src/server/http/validation.ts`, `src/server/controllers/leads.ts`, `src/server/routes/leads.ts`, `src/server/routes/calls.ts`, `src/server/routes/tools.ts`, `src/server/routes/vapi.ts`, and `src/server/types.ts`.
+- **Call workflows** — `src/server/calls/callOrchestrator.ts`, `src/server/agent/llmCallOrchestrator.ts`, `src/server/tools/getLeadContext.ts`, `src/server/tools/checkCalendarAvailability.ts`, `src/server/tools/bookMeeting.ts`, `src/server/tools/saveCallSummary.ts`, `src/server/vapi/vapiVoiceService.ts`, and `src/dashboard/LiveCalls.tsx`.
+- **Tests** — `tests/api.integration.test.ts` and `tests/mongoFixture.ts`.
+- **Phase record** — `PROJECT.md` at the workspace root.
 
 ## Phase 1 dashboard
 
@@ -98,11 +132,11 @@ Overview conversion is distinct CRM leads with a booked meeting divided by total
 
 1. The browser starts an LLM call and receives Carla's opening. The user types a reply or captures it through the browser microphone using the configured input language.
 2. The browser sends the call ID, lead ID, transcript, and latest reply. The backend classifies intent, checks scheduling rules, and returns a tool-backed or model-generated reply. The browser can play agent text through a separate muted Vapi session using `vapi.say`.
-3. The backend writes a call snapshot on turns. Booking and the scheduling-email branch save summaries. The dashboard honors the backend's completion status and captures a history entry when the call ends. Manual **End call** stops the local console and records a local history entry. Reaching the turn limit can still leave an unfinished backend summary.
+3. The backend persists the conversation and summary on every turn. Booking, the scheduling-email branch, opt-out handling, manual end, and the turn limit finalize the stored call. The dashboard captures a local history entry using the API result.
 
 ### Vapi outbound and webhooks
 
-`POST /api/vapi/calls` defaults to dry run. Real dialing requires explicit opt-in, a server key, a phone number ID, an assistant ID, and a customer number. The configured assistant can forward model requests to `/api/vapi/chat/completions`, which derives the lead from metadata and invokes the interactive orchestrator. `/api/vapi/turn` is a direct transcript adapter. `/api/vapi/webhook` acknowledges `message.type` without processing call lifecycle events. Live audio, streaming compatibility, callback authentication, actual hang-up, and end-of-call persistence remain unverified. [Vapi server events](https://docs.vapi.ai/server-url/events) · [Vapi server authentication](https://docs.vapi.ai/server-url/server-authentication)
+`POST /api/vapi/calls` defaults to dry run. Real dialing requires explicit opt-in, a server key, an assistant ID, a phone number ID, the lead's persisted phone number, and a Bearer credential. `/api/vapi/chat/completions` and `/api/vapi/turn` resolve the stored conversation and verify the lead binding. `/api/vapi/webhook` finalizes known active voice calls on an end-of-call report. Dry run, transport authentication, and session finalization passed against synthetic callbacks. Live audio, streaming negotiation, and outbound dialing still require provider verification. [Vapi server events](https://docs.vapi.ai/server-url/events) · [Vapi server authentication](https://docs.vapi.ai/server-url/server-authentication)
 
 ## Carla's prompt and backend tools
 
@@ -110,10 +144,10 @@ Overview conversion is distinct CRM leads with a booked meeting divided by total
 
 | Tool | Behavior |
 |---|---|
-| `getLeadContext` / `getAllLeads` | Reads the CRM seed and resolves one lead or lists all leads. |
-| `checkCalendarAvailability` | Reads runtime or seed slots, filters by availability and optional date prefix, and returns up to three. |
-| `bookMeeting` | Checks the lead and slot, marks the slot booked in local calendar JSON, and returns meeting details. |
-| `saveCallSummary` | Writes a timestamped JSON summary and returns its ID and filesystem path. |
+| `getLeadContext` / lead list service | Queries persisted CRM leads and excludes archived leads. |
+| `checkCalendarAvailability` | Returns up to three future available slots, optionally filtered by UTC date. |
+| `bookMeeting` | Atomically checks and reserves an available slot. Orchestrated calls commit the reservation with the transcript and summary. |
+| `saveCallSummary` | Persists a structured summary and returns its ID and HTTP resource path. |
 | `classifyLeadOutcome` | Applies ordered keyword and summary rules. It prioritizes booking and can interpret both speakers' words as outcome signals. |
 
 ## API inventory
@@ -121,19 +155,28 @@ Overview conversion is distinct CRM leads with a booked meeting divided by total
 | Method and route | Purpose |
 |---|---|
 | `GET /health` | Backend health |
+| `GET /health/db` | MongoDB readiness |
 | `GET /api/agent` | Carla's profile |
 | `GET /api/leads` | CRM lead list |
 | `GET /api/leads/:leadId` | One CRM lead |
+| `POST /api/leads` | Creates a lead with a server-generated ID |
+| `PATCH /api/leads/:leadId` | Updates lead fields |
+| `DELETE /api/leads/:leadId` | Archives the lead and retains history |
 | `GET /api/calendar/availability` | Availability, optionally with `preferredDate` |
 | `POST /api/meetings` | Mock booking from `leadId`, `slotId`, and optional `notes` |
+| `GET /api/appointments` | Paginated appointment records with optional status, lead, and date filters |
 | `POST /api/call-summaries` | Writes a submitted summary |
+| `GET /api/call-summaries/:summaryId` | Retrieves a persisted summary and outcome |
 | `POST /api/lead-outcomes/classify` | Classifies a transcript and optional summary |
 | `POST /api/calls` | Complete deterministic or scripted LLM demo |
+| `GET /api/calls` | Paginated call metadata with optional lead, channel, mode, outcome, and status filters |
+| `GET /api/calls/:callId` | Retrieves call metadata, transcript, and summary |
 | `POST /api/calls/interactive/start` | Generates an opening for `leadId` and `mode: "llm"` |
 | `POST /api/calls/interactive/turn` | Uses `leadId`, optional `callId`, `transcript`, and `leadReply` |
+| `POST /api/calls/:callId/end` | Finalizes an active browser interactive call |
 | `GET /api/vapi/config` | Vapi configuration and process-local call budget |
 | `POST /api/vapi/calls` | Planned or real outbound call |
-| `POST /api/vapi/webhook` | Acknowledges the Vapi message type |
+| `POST /api/vapi/webhook` | Acknowledges the event and finalizes known voice calls on end-of-call reports |
 | `POST /api/vapi/chat/completions` | Maps Vapi messages and lead metadata to an interactive turn |
 | `POST /api/vapi/turn` | Direct transcript bridge returning Carla's latest reply |
 
@@ -162,12 +205,11 @@ Overview conversion is distinct CRM leads with a booked meeting divided by total
 
 | Area | Finding | Required work |
 |---|---|---|
-| Booking | **Reproduced.** Accepting option 2 booked option 1. A fresh availability lookup picks `slots[0]`, and a model flag can trigger booking without a recorded offer. | Record offered slot IDs server-side, resolve the accepted option, and reject an unavailable slot without substituting. |
-| Calendar | **Reproduced.** Exhausting available slots reopens booked seed slots. Fixtures use past June–July 2026 dates. Concurrent read-modify-write calls can lose updates or double-book. | Keep persisted exhaustion authoritative, use future mock dates, and make reservations atomic within the supported storage design. |
-| Interactive lifecycle | **Reproduced in Phase 0.** The turn limit marks the call ended while keeping an in-progress summary. Phase 1 uses the backend status in the console. Manual end remains browser-local. | Store server-owned sessions, expose lifecycle status, and finalize each terminal path once. |
-| API and storage | Invalid mode was accepted during the audit. Runtime schemas, auth, rate limits, and constrained output fields are missing. Caller-supplied IDs reach filesystem paths and errors expose internal details. | Validate boundaries and IDs, restrict routes and data access, return stable errors, and handle transcript retention. |
-| Model contract | Reply JSON is cast without schema validation. Intent flags use boolean coercion. The classifier mixes agent and lead messages and differs from prompt outcome labels. | Validate model output, separate speaker signals, and align public outcomes and finalization rules. |
-| Voice | Browser effects can reconnect after end or failure. The outbound counter is process-local and increments after the provider request. The outbound payload uses a legacy URL field. | Fix connection lifecycle, enforce the budget, reconcile SDK types, and verify provider events, transport, and call termination. |
+| Booking and calendar | Phase 2 fixed the wrong-slot and exhausted-calendar defects. Integration tests cover exact consent, concurrent reservations, fresh seed dates, and persistence across restarts. | Plan a production calendar adapter when the evaluation requires live appointments. |
+| Interactive lifecycle | Phase 2 persists backend-owned sessions and saves summaries for terminal calls, including the turn cap and manual end. | Add a durable suppression workflow if required for real outreach. |
+| API and storage | Phase 2 validates inputs and returns sanitized errors. Express is a single-tenant local workspace. | Add shared-deployment authentication, tenant scoping, rate limits, and transcript retention before public access. |
+| Model contract | Phase 2 validates reply and intent JSON. The existing rule-based classifier still mixes agent and lead messages and differs from some prompt outcome labels. | Align the classifier and prompt vocabularies and classify speaker evidence separately. |
+| Voice | Phase 2 supports authenticated provider callbacks and stored voice sessions. The outbound budget remains process-local. | Verify live audio, callback delivery, termination, and provider costs with a configured assistant before enabling real dialing. |
 | Dependencies | Findings include Express transitive `proxy-addr` and `body-parser`, dev runner `shell-quote`, Vite, and Zod. | Reconcile patched locked versions and repeat the build, lint, and demo checks. |
 | Follow-up | Real CRM writeback, calendar invites, email delivery, callback queue, and durable suppression are absent. | Add adapters only where required for the evaluation. |
 
@@ -182,10 +224,10 @@ npm.cmd run build
 npm.cmd run lint
 npm.cmd audit
 if (-not (Test-Path .env)) { Copy-Item .env.example .env }
-npm.cmd run dev
+npm.cmd test
 ```
 
-Open `http://localhost:5173`. Select **Predefined** for the credential-free demo. The servers can also run in separate terminals using `npm.cmd start` and `npm.cmd run dev:client -- --no-open`.
+Set the database variables in the ignored `.env`, then run `npm.cmd run dev`. Open `http://localhost:5173` and select **Predefined** for the demo without AI or voice credentials. The servers can also run in separate terminals using `npm.cmd start` and `npm.cmd run dev:client -- --no-open`.
 
 ```powershell
 Invoke-RestMethod http://localhost:3001/health
@@ -196,19 +238,19 @@ $result = Invoke-RestMethod http://localhost:3001/api/calls `
 $result.call.classification
 ```
 
-Expected results are healthy `ai-sdr`, eight leads, and `call_back_later`. The audit checkout contains generated booking state under `logs/`. Use clean mock state to verify first-run booking.
+The initial demo database produces healthy `ai-sdr`, eight leads, and `call_back_later`. Use a separate database name to verify first-run booking independently of existing reservations.
 
 Keep secrets in ignored `.env` files. `OPENAI_API_KEY` enables AI modes. `OPENAI_MODEL`, `MAX_CALL_TURNS`, `MAX_INTERACTIVE_LEAD_TURNS`, and `MAX_OUTPUT_TOKENS` configure the model and turn limits. `AGENT_MODE` sets the server default, and `PORT` controls the backend port. `VITE_VAPI_PUBLIC_KEY` and `VITE_VAPI_ASSISTANT_ID` configure browser voice. The server Vapi configuration uses `VAPI_API_KEY`, `VAPI_PUBLIC_BASE_URL`, `VAPI_PHONE_NUMBER_ID`, `VAPI_ASSISTANT_ID`, `VAPI_ALLOW_OUTBOUND_CALLS`, `VAPI_MAX_OUTBOUND_CALLS`, and `VAPI_MAX_CALL_DURATION_SECONDS`. Outbound is disabled by default. Treat `VITE_` variables as browser-visible.
 
 ## Implementation sequence and phase history
 
-1. Correct booking and calendar integrity. Verify that option 2 books the exact offered slot, that an unavailable accepted slot is never silently replaced, and that exhausted slots stay unavailable.
-2. Finish interactive sessions, outcomes, and finalization. Keep the browser and backend on one lifecycle contract.
-3. Harden API boundaries and provider budgets, and remediate dependency advisories before public exposure.
-4. Verify Vapi end to end with authenticated provider events and reliable call termination before enabling real outbound calls.
-5. Add external integrations required by the evaluation through the existing tool interfaces.
+1. Connect dashboard history and appointments to the paginated MongoDB reads if the evaluation requires shared reporting.
+2. Add shared deployment authentication and tenant boundaries, bound provider budgets, and remediate dependency advisories before public exposure.
+3. Verify Atlas and live Vapi with an authorized test connection and configured assistant.
+4. Add external integrations required by the evaluation through the existing tool interfaces.
 
 | Phase | Recorded result | Next action |
 |---|---|---|
 | Phase 0 · November 25, 2026 | Repository audit complete. Build, local demo, mock tools, and stub-backed AI paths verified. | Identified calendar and booking corrections as a pending backend task. |
-| Phase 1 · November 25, 2026 | Dashboard complete. Production build, lint, responsive browser checks, and stub-backed AI call workflows passed. | Calendar and booking corrections remain pending. |
+| Phase 1 · November 25, 2026 | Dashboard complete. Production build, lint, responsive browser checks, and stub-backed AI call workflows passed. | Move the server's persistence into MongoDB. |
+| Phase 2 | MongoDB backend, validation, and booking correctness implemented. Eight integration tests passed against a local replica set, including two API restarts. | Verify the configured Atlas and provider deployments when credentials are available. |

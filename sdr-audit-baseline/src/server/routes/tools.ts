@@ -1,83 +1,31 @@
 import { Router } from "express";
+import { listAppointments } from "../services/appointments.js";
+import { readSummary } from "../services/calls.js";
 import { bookMeeting } from "../tools/bookMeeting.js";
 import { checkCalendarAvailability } from "../tools/checkCalendarAvailability.js";
 import { classifyLeadOutcome } from "../tools/classifyLeadOutcome.js";
-import { getAllLeads, getLeadContext } from "../tools/getLeadContext.js";
 import { saveCallSummary } from "../tools/saveCallSummary.js";
+import {
+  appointmentQuery, availabilityQuery, classifyBody, meetingBody, summaryBody, summaryIdParams, validated,
+} from "../http/validation.js";
 
 export const toolsRouter = Router();
 
-toolsRouter.get("/leads", async (_req, res, next) => {
-  try {
-    res.json({ leads: await getAllLeads() });
-  } catch (error) {
-    next(error);
-  }
-});
-
-toolsRouter.get("/leads/:leadId", async (req, res, next) => {
-  try {
-    res.json({ lead: await getLeadContext(req.params.leadId) });
-  } catch (error) {
-    next(error);
-  }
-});
-
-toolsRouter.get("/calendar/availability", async (req, res, next) => {
-  try {
-    const preferredDate =
-      typeof req.query.preferredDate === "string"
-        ? req.query.preferredDate
-        : undefined;
-
-    res.json({
-      slots: await checkCalendarAvailability(preferredDate),
-    });
-  } catch (error) {
-    next(error);
-  }
-});
-
-toolsRouter.post("/meetings", async (req, res, next) => {
-  try {
-    const { leadId, slotId, notes } = req.body as {
-      leadId?: string;
-      slotId?: string;
-      notes?: string;
-    };
-
-    if (!leadId || !slotId) {
-      res.status(400).json({ error: "leadId and slotId are required" });
-      return;
-    }
-
-    res.status(201).json({
-      meeting: await bookMeeting(leadId, slotId, notes),
-    });
-  } catch (error) {
-    next(error);
-  }
-});
-
-toolsRouter.post("/call-summaries", async (req, res, next) => {
-  try {
-    res.status(201).json(await saveCallSummary(req.body));
-  } catch (error) {
-    next(error);
-  }
-});
-
-toolsRouter.post("/lead-outcomes/classify", (req, res, next) => {
-  try {
-    const { transcript, summary } = req.body as {
-      transcript?: string;
-      summary?: Parameters<typeof classifyLeadOutcome>[1];
-    };
-
-    res.json({
-      classification: classifyLeadOutcome(transcript, summary),
-    });
-  } catch (error) {
-    next(error);
-  }
-});
+toolsRouter.get("/calendar/availability", validated({ query: availabilityQuery }, async ({ query }, res) => {
+  res.json({ slots: await checkCalendarAvailability(query.preferredDate) });
+}));
+toolsRouter.get("/appointments", validated({ query: appointmentQuery }, async ({ query }, res) => {
+  res.json(await listAppointments(query));
+}));
+toolsRouter.post("/meetings", validated({ body: meetingBody }, async ({ body }, res) => {
+  res.status(201).json({ meeting: await bookMeeting(body.leadId, body.slotId, body.notes) });
+}));
+toolsRouter.post("/call-summaries", validated({ body: summaryBody }, async ({ body }, res) => {
+  res.status(201).json(await saveCallSummary(body));
+}));
+toolsRouter.get("/call-summaries/:summaryId", validated({ params: summaryIdParams }, async ({ params }, res) => {
+  res.json(await readSummary(params.summaryId));
+}));
+toolsRouter.post("/lead-outcomes/classify", validated({ body: classifyBody }, ({ body }, res) => {
+  res.json({ classification: classifyLeadOutcome(body.transcript, body.summary) });
+}));

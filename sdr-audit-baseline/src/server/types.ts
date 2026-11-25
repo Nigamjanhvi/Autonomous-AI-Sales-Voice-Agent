@@ -21,6 +21,7 @@ export type Lead = {
   discussionTopic: string;
   previousInteraction: string;
   workEmail: string;
+  phoneNumber?: string;
 };
 
 export type CalendarSlot = {

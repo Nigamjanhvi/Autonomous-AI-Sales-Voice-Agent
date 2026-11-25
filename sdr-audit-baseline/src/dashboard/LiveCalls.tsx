@@ -422,8 +422,29 @@ export function LiveCalls({ leads, agentProfile, preferences, requestedLead, onR
     }
   }
 
-  const endCall = () => {
-    if (call && startedAt !== null) captureCall(call, startedAt, true)
+  const endCall = async () => {
+    let endedCall = call
+    if (call && activeCallMode === 'interactive') {
+      setIsLoading(true)
+      setError(null)
+      try {
+        const response = await fetch(apiBase + '/api/calls/' + encodeURIComponent(call.callId) + '/end', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ leadId: call.lead.id }),
+        })
+        const body = (await response.json()) as { call?: CallResult; error?: string }
+        if (!response.ok || !body.call) throw new Error(body.error || 'The backend could not finalize this call.')
+        endedCall = body.call
+        setCall(endedCall)
+      } catch (error) {
+        setError(error instanceof Error ? error.message : 'The backend could not finalize this call.')
+        return
+      } finally {
+        setIsLoading(false)
+      }
+    }
+    if (endedCall && startedAt !== null) captureCall(endedCall, startedAt, true)
     recognitionRef.current?.abort()
     void stopVapiVoice().catch(() => setVapiVoiceError('Could not close Vapi audio.'))
     setStatus('idle')

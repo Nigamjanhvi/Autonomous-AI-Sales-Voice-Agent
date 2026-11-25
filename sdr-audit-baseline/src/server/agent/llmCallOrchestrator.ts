@@ -1,12 +1,14 @@
+import { randomUUID } from "node:crypto";
 import OpenAI from "openai";
+import { z } from "zod";
 import { carlaSystemPrompt } from "./carlaSystemPrompt.js";
 import { agentConfig } from "../config/agent.config.js";
-import { writeJsonFile } from "../storage/jsonStore.js";
-import { bookMeeting } from "../tools/bookMeeting.js";
+import { ApiError, isDuplicate } from "../http/errors.js";
+import { callIsComplete, getCall, persistCall, withCallTurn } from "../services/calls.js";
+import { prepareMeeting } from "../tools/bookMeeting.js";
 import { checkCalendarAvailability } from "../tools/checkCalendarAvailability.js";
 import { classifyLeadOutcome } from "../tools/classifyLeadOutcome.js";
 import { getLeadContext } from "../tools/getLeadContext.js";
-import { saveCallSummary } from "../tools/saveCallSummary.js";
 import type {
   CalendarSlot,
   CallResult,
@@ -47,7 +49,7 @@ type LeadScriptTurn = {
   lead: string;
 };
 
-type LeadContextForLlm = Omit<Lead, "scenario">;
+type LeadContextForLlm = Omit<Lead, "scenario" | "phoneNumber">;
 
 const leadIntentValues = [
   "interested",
@@ -75,6 +77,32 @@ const nextAgentMoveValues = [
   "close",
 ] as const;
 
+const carlaTurnSchema = z.object({
+  reply: z.string().trim().min(1).max(4000),
+  detectedPainPoints: z.array(z.string().max(500)).max(30).default([]),
+  detectedObjections: z.array(z.string().max(500)).max(30).default([]),
+  interestLevel: z.enum(["high", "medium", "low", "none"]),
+  recommendedToolCall: z.object({
+    name: z.enum(["getLeadContext", "checkCalendarAvailability", "bookMeeting", "saveCallSummary", "classifyLeadOutcome", "none"]),
+    reason: z.string().max(1000),
+  }),
+  outcome: z.enum(["meeting_booked", "interested", "send_follow_up", "call_back_later", "not_interested", "unqualified"]),
+  nextBestAction: z.string().trim().min(1).max(1000),
+});
+const intentSchema = z.object({
+  intent: z.enum(leadIntentValues),
+  objectionType: z.enum(objectionTypeValues),
+  shouldCheckCalendar: z.boolean(),
+  shouldBookMeeting: z.boolean(),
+  nextAgentMove: z.enum(nextAgentMoveValues),
+  reasoning: z.string().max(1000),
+});
+
+function parseModelOutput<T>(schema: z.ZodType<T>, content: string | null | undefined): T {
+  try { return schema.parse(JSON.parse(content ?? "")); }
+  catch { throw new ApiError(502, "INVALID_MODEL_RESPONSE", "The AI provider returned an invalid response. Try again."); }
+}
+
 const model = () => process.env.OPENAI_MODEL ?? "gpt-4.1-mini";
 
 const maxOutputTokens = () => {
@@ -95,28 +123,24 @@ const maxInteractiveLeadTurns = () => {
   return Number.isFinite(parsed) && parsed > 0 ? Math.min(parsed, 8) : 6;
 };
 
-const callId = (leadId: string) =>
-  `${leadId}-llm-${new Date().toISOString().replaceAll(/[:.]/g, "-")}`;
-
-const interactiveCallId = (leadId: string) =>
-  `${leadId}-interactive-${new Date().toISOString().replaceAll(/[:.]/g, "-")}`;
-
 const requireApiKey = () => {
   const apiKey = process.env.OPENAI_API_KEY;
 
   if (!apiKey || apiKey === "replace_me") {
-    throw new Error(
+    throw new ApiError(503, "OPENAI_NOT_CONFIGURED",
       "AGENT_MODE=llm requires OPENAI_API_KEY in .env. Keep AGENT_MODE=deterministic to run without LLM cost.",
     );
   }
 
   return apiKey;
 };
+const modelClient = () => new OpenAI({ apiKey: requireApiKey(), timeout: 25_000, maxRetries: 1 });
 
 export const runLlmCall = async (leadId: string): Promise<CallResult> => {
+  const startedAt = new Date();
   const lead = await getLeadContext(leadId);
-  const client = new OpenAI({ apiKey: requireApiKey() });
-  const id = callId(lead.id);
+  const client = modelClient();
+  const id = `call_${randomUUID()}`;
   const transcript: CallResult["transcript"] = [];
   const statusEvents: CallResult["statusEvents"] = [];
   const toolCalls: CallToolCall[] = [
@@ -178,10 +202,10 @@ export const runLlmCall = async (leadId: string): Promise<CallResult> => {
         agentSays(`I checked the calendar and have ${formatSlot(slot)} with ${slot.salesRep}. Does that work?`);
         leadSays("Yes, that works. Please send the invite.");
         setStatus("thinking", "Booking meeting");
-        const meeting = await bookMeeting(
+        const meeting = await prepareMeeting(
           lead.id,
           slot.id,
-          "Qualified AI scripted call: Sarah asked to book a workflow-focused demo.",
+          "Qualified AI scripted call: lead asked to book a workflow-focused demo.",
         );
         toolCalls.push({
           name: "bookMeeting",
@@ -226,7 +250,7 @@ export const runLlmCall = async (leadId: string): Promise<CallResult> => {
         agentSays(`I have ${slot.startsAt} with ${slot.salesRep}. Would that work?`);
         leadSays("Yes, that works.");
         setStatus("thinking", "Booking meeting");
-        const meeting = await bookMeeting(
+        const meeting = await prepareMeeting(
           lead.id,
           slot.id,
           "Qualified LLM call: lead agreed to a meeting.",
@@ -273,12 +297,6 @@ export const runLlmCall = async (leadId: string): Promise<CallResult> => {
   const classification = classifyLeadOutcome(transcriptText, summary);
 
   setStatus("thinking", "Saving call summary");
-  const savedSummary = await saveCallSummary(summary);
-  toolCalls.push({
-    name: "saveCallSummary",
-    input: { summary },
-    output: { id: savedSummary.id, path: savedSummary.path },
-  });
 
   const result: CallResult = {
     callId: id,
@@ -297,258 +315,183 @@ export const runLlmCall = async (leadId: string): Promise<CallResult> => {
     classification,
   };
 
-  await writeJsonFile(result, "logs", "calls", `${id}.json`);
-
-  return result;
+  return persistCall(result, { kind: "demo", startedAt, createOnly: true });
 };
 
-export const startInteractiveLlmCall = async (leadId: string): Promise<CallResult> => {
-  const lead = await getLeadContext(leadId);
-  const client = new OpenAI({ apiKey: requireApiKey() });
-  const transcript: CallResult["transcript"] = [];
-  const statusEvents: CallResult["statusEvents"] = [{ status: "thinking", label: "Loading lead context" }];
-  const toolCalls: CallToolCall[] = [
-    {
-      name: "getLeadContext",
-      input: { leadId },
-      output: lead,
-    },
-  ];
-
-  statusEvents.push({ status: "thinking", label: "Carla is preparing the opening" });
-  const openingTurn = await generateCarlaTurn(client, lead, transcript);
-  statusEvents.push({ status: "agent_speaking", label: `${agentConfig.name} speaking` });
-  transcript.push({ speaker: "agent", name: agentConfig.name, message: openingTurn.reply });
-
-  return interactiveCallResult({
-    callId: interactiveCallId(lead.id),
-    lead,
-    transcript,
-    toolCalls,
-    statusEvents,
-    intentDetections: [],
-    latestTurn: openingTurn,
-  });
-};
-
-export const runInteractiveLlmTurn = async ({
-  callId,
-  leadId,
-  transcript,
-  leadReply,
-}: {
-  callId?: string;
-  leadId: string;
-  transcript: CallTranscriptEntry[];
-  leadReply: string;
-}): Promise<CallResult> => {
-  const lead = await getLeadContext(leadId);
-  const client = new OpenAI({ apiKey: requireApiKey() });
-  const toolCalls: CallToolCall[] = [];
-  const nextTranscript: CallResult["transcript"] = [
-    ...transcript,
-    { speaker: "lead", name: lead.name, message: leadReply },
-  ];
-  const statusEvents: CallResult["statusEvents"] = [
-    { status: "lead_speaking", label: `${lead.name} speaking` },
-    { status: "thinking", label: "Reading lead intent" },
-  ];
-  const intent = await detectLeadIntent(client, lead, nextTranscript, leadReply);
-
-  if (shouldSendTimeSlotsByEmail(leadReply, transcript)) {
-    const summary: CallSummary = {
-      leadId: lead.id,
-      leadName: lead.name,
-      company: lead.company,
-      painPoints: [],
-      objections: [],
-      interestLevel: "high",
-      meetingStatus: "follow_up_needed",
-      recommendedNextAction: `Email available meeting time slots to ${lead.workEmail}.`,
-      shortSummaryForSales: `${lead.name} at ${lead.company} wants available meeting time slots sent by email.`,
-    };
-    const savedSummary = await saveCallSummary(summary);
-    toolCalls.push({
-      name: "saveCallSummary",
-      input: { summary },
-      output: { id: savedSummary.id, path: savedSummary.path },
-    });
-    const message = `Absolutely, ${lead.name}. I will send available meeting time slots to ${lead.workEmail} so you can choose one there. Thanks for your time.`;
-    statusEvents.push({ status: "agent_speaking", label: `${agentConfig.name} speaking` });
-    nextTranscript.push({ speaker: "agent", name: agentConfig.name, message });
-
-    const result = interactiveCallResult({
-      callId: callId ?? interactiveCallId(lead.id),
-      lead,
-      transcript: nextTranscript,
-      toolCalls,
-      statusEvents,
-      intentDetections: [intent],
-      summaryOverride: summary,
-      forceFinal: true,
-      latestTurn: {
-        reply: message,
-        detectedPainPoints: [],
-        detectedObjections: [],
-        interestLevel: "high",
-        recommendedToolCall: {
-          name: "saveCallSummary",
-          reason: "Lead asked to receive available meeting slots by email.",
-        },
-        outcome: "send_follow_up",
-        nextBestAction: `Email available meeting time slots to ${lead.workEmail}.`,
-      },
-    });
-
-    await writeJsonFile(result, "logs", "calls", `${result.callId}.json`);
-
-    return result;
-  }
-
-  if (shouldBookFromReply(intent, transcript, leadReply)) {
-    statusEvents.push({ status: "thinking", label: "Booking meeting" });
-    const slots = await checkCalendarAvailability();
-    toolCalls.push({
-      name: "checkCalendarAvailability",
-      input: {},
-      output: slots,
-    });
-    const slot = slots[0];
-
-    if (slot) {
-      const meeting = await bookMeeting(
-        lead.id,
-        slot.id,
-        "Qualified interactive LLM call: lead agreed to an available meeting slot.",
-      );
-      const summary: CallSummary = {
-        leadId: lead.id,
-        leadName: lead.name,
-        company: lead.company,
-        painPoints: [],
-        objections: [],
-        interestLevel: "high",
-        meetingStatus: "booked",
-        bookedSlotId: meeting.slotId,
-        recommendedNextAction: "Send calendar invite and prepare sales rep with call context.",
-        shortSummaryForSales: `${lead.name} at ${lead.company} booked a meeting with ${meeting.salesRep} for ${formatSlot(slot)}.`,
-      };
-      toolCalls.push({
-        name: "bookMeeting",
-        input: { leadId: lead.id, slotId: slot.id },
-        output: meeting,
+export const startInteractiveLlmCall = async (
+  leadId: string,
+  voice?: { providerCallId?: string },
+): Promise<CallResult> => {
+  const startedAt = new Date();
+  const stableId = voice?.providerCallId ? voiceCallId(voice.providerCallId) : undefined;
+  if (stableId) {
+    try {
+      const existing = await existingVoiceCall(stableId, leadId);
+      if (existing.transcript.length || callIsComplete(existing)) return existing;
+      return await withCallTurn(stableId, leadId, async (turnToken) => {
+        const current = await existingVoiceCall(stableId, leadId);
+        if (current.transcript.length) return current;
+        const result = await generateOpening(stableId, current.lead);
+        return persistCall(result, { kind: "vapi", turnToken });
       });
-      const savedSummary = await saveCallSummary(summary);
-      toolCalls.push({
-        name: "saveCallSummary",
-        input: { summary },
-        output: { id: savedSummary.id, path: savedSummary.path },
-      });
-      const message = `Perfect, I booked ${formatSlot(slot)} with ${slot.salesRep}. Thanks ${lead.name}; we will send the invite to ${lead.workEmail}.`;
-      statusEvents.push({ status: "agent_speaking", label: `${agentConfig.name} speaking` });
-      nextTranscript.push({ speaker: "agent", name: agentConfig.name, message });
-
-      const result = interactiveCallResult({
-        callId: callId ?? interactiveCallId(lead.id),
-        lead,
-        transcript: nextTranscript,
-        toolCalls,
-        statusEvents,
-        intentDetections: [intent],
-        summaryOverride: summary,
-        latestTurn: {
-          reply: message,
-          detectedPainPoints: [],
-          detectedObjections: [],
-          interestLevel: "high",
-          recommendedToolCall: {
-            name: "bookMeeting",
-            reason: "Lead agreed to a meeting slot.",
-          },
-          outcome: "meeting_booked",
-          nextBestAction: "Send calendar invite and prepare sales rep with call context.",
-        },
-      });
-
-      await writeJsonFile(result, "logs", "calls", `${result.callId}.json`);
-
-      return result;
+    }
+    catch (error) {
+      if (!(error instanceof ApiError && error.code === "CALL_NOT_FOUND")) throw error;
     }
   }
 
-  if (shouldOfferCalendarOptions(intent, leadReply, transcript)) {
-    statusEvents.push({ status: "thinking", label: "Checking calendar availability" });
-    const slots = await checkCalendarAvailability();
-    toolCalls.push({
-      name: "checkCalendarAvailability",
-      input: {},
-      output: slots,
-    });
-    const message = calendarOptionsMessage(slots, lead);
-    statusEvents.push({ status: "agent_speaking", label: `${agentConfig.name} speaking` });
-    nextTranscript.push({ speaker: "agent", name: agentConfig.name, message });
-
-    const result = interactiveCallResult({
-      callId: callId ?? interactiveCallId(lead.id),
-      lead,
-      transcript: nextTranscript,
-      toolCalls,
-      statusEvents,
-      intentDetections: [intent],
-      latestTurn: {
-        reply: message,
-        detectedPainPoints: [],
-        detectedObjections: [],
-        interestLevel: "high",
-        recommendedToolCall: {
-          name: "checkCalendarAvailability",
-          reason: "Lead asked to book or discuss a meeting.",
-        },
-        outcome: "interested",
-        nextBestAction: "Wait for the lead to choose or confirm one of the offered slots.",
-      },
-    });
-
-    await writeJsonFile(result, "logs", "calls", `${result.callId}.json`);
-
-    return result;
+  const lead = await getLeadContext(leadId);
+  const result = await generateOpening(stableId ?? "call_" + randomUUID(), lead);
+  try {
+    return await persistCall(result, { kind: voice ? "vapi" : "interactive", startedAt, createOnly: true });
+  } catch (error) {
+    if (stableId && isDuplicate(error)) return existingVoiceCall(stableId, leadId);
+    throw error;
   }
-
-  statusEvents.push({ status: "thinking", label: "Carla is reasoning from lead response" });
-  const carlaTurn = await generateCarlaTurn(client, lead, nextTranscript);
-  if (carlaPromisedCalendarCheck(carlaTurn)) {
-    statusEvents.push({ status: "thinking", label: "Checking calendar availability" });
-    const slots = await checkCalendarAvailability();
-    toolCalls.push({
-      name: "checkCalendarAvailability",
-      input: {},
-      output: slots,
-    });
-    carlaTurn.reply = `${carlaTurn.reply} ${calendarOptionsMessage(slots, lead)}`;
-    carlaTurn.recommendedToolCall = {
-      name: "checkCalendarAvailability",
-      reason: "Carla promised to check calendar availability.",
-    };
-    carlaTurn.outcome = "interested";
-    carlaTurn.nextBestAction = "Wait for the lead to choose or confirm one of the offered slots.";
-  }
-  statusEvents.push({ status: "agent_speaking", label: `${agentConfig.name} speaking` });
-  nextTranscript.push({ speaker: "agent", name: agentConfig.name, message: carlaTurn.reply });
-
-  const result = interactiveCallResult({
-    callId: callId ?? interactiveCallId(lead.id),
-    lead,
-    transcript: nextTranscript,
-    toolCalls,
-    statusEvents,
-    intentDetections: [intent],
-    latestTurn: carlaTurn,
-  });
-
-  await writeJsonFile(result, "logs", "calls", `${result.callId}.json`);
-
-  return result;
 };
+
+async function generateOpening(callId: string, lead: Lead) {
+  const opening = await generateCarlaTurn(modelClient(), lead, []);
+  return interactiveCallResult({
+    callId,
+    lead,
+    transcript: [{ speaker: "agent", name: agentConfig.name, message: opening.reply }],
+    toolCalls: [{ name: "getLeadContext", input: { leadId: lead.id }, output: lead }],
+    statusEvents: [
+      { status: "thinking", label: "Loading lead context" },
+      { status: "thinking", label: "Carla is preparing the opening" },
+      { status: "agent_speaking", label: agentConfig.name + " speaking" },
+    ],
+    intentDetections: [],
+    latestTurn: opening,
+  });
+}
+
+export function voiceCallId(providerId: string) {
+  return providerId.startsWith("vapi_") || providerId.startsWith("call_") ? providerId : "vapi_" + providerId;
+}
+
+async function existingVoiceCall(callId: string, leadId: string) {
+  const { call, metadata } = await getCall(callId);
+  if (metadata.kind !== "vapi" || metadata.leadId !== leadId) {
+    throw new ApiError(409, "CALL_MISMATCH", "The provider call does not match this lead.");
+  }
+  return call;
+}
+
+export const runInteractiveLlmTurn = async ({
+  callId, leadId, leadReply, expectedMessageCount, kind = "interactive",
+}: {
+  callId?: string;
+  leadId: string;
+  leadReply: string;
+  expectedMessageCount?: number;
+  kind?: "interactive" | "vapi";
+}): Promise<CallResult> => {
+  const id = callId ?? (await startInteractiveLlmCall(leadId)).callId;
+  await getLeadContext(leadId);
+  return withCallTurn(id, leadId, async (turnToken) => {
+    const { call: prior, metadata, offeredSlotIds: previousOptions } = await getCall(id);
+    if (metadata.kind !== kind) throw new ApiError(404, "CALL_NOT_FOUND", "Call not found for this transport.");
+    if (callId && expectedMessageCount !== undefined && prior.transcript.length !== expectedMessageCount) {
+      throw new ApiError(409, "STALE_TRANSCRIPT", "This call has advanced. Reload the call before submitting another reply.");
+    }
+    const { lead, transcript } = prior;
+    const entries: CallTranscriptEntry[] = [...transcript, { speaker: "lead", name: lead.name, message: leadReply }];
+    const statusEvents: CallResult["statusEvents"] = [
+      { status: "lead_speaking", label: lead.name + " speaking" },
+      { status: "thinking", label: "Reading lead intent" },
+    ];
+    const client = modelClient();
+    const intent = await detectLeadIntent(client, lead, entries, leadReply);
+    const tools: CallToolCall[] = [];
+    let offeredSlotIds = previousOptions;
+    let summary: CallSummary | undefined;
+    let terminal = false;
+    let turn: CarlaTurn;
+    const acceptedSlotId = selectOfferedSlot(previousOptions, leadReply);
+
+    if (shouldSendTimeSlotsByEmail(leadReply, transcript)) {
+      const nextAction = "Email available meeting time slots to " + lead.workEmail + ".";
+      turn = scriptedTurn("Absolutely. I will have the team send available meeting times. Thanks for your time.",
+        "high", nextAction, "send_follow_up");
+      summary = { ...prior.summary, interestLevel: "high", meetingStatus: "follow_up_needed",
+        recommendedNextAction: nextAction, shortSummaryForSales: lead.name + " asked for available meeting times by email." };
+      terminal = true;
+    } else if (/\b(remove me|stop (calling|contacting me)|opt me out|do not (call|contact) me)\b/i.test(leadReply)) {
+      turn = scriptedTurn("Understood. I’ll end the call and note your request. Thank you.", "none",
+        "Stop active outreach and record the opt-out request.", "not_interested");
+      terminal = true;
+    } else if (acceptedSlotId) {
+      statusEvents.push({ status: "thinking", label: "Booking meeting" });
+      const meeting = await prepareMeeting(lead.id, acceptedSlotId, "Qualified interactive call: lead accepted an offered slot.");
+      tools.push({ name: "bookMeeting", input: { leadId: lead.id, slotId: acceptedSlotId }, output: meeting });
+      const formattedTime = formatSlot(meeting);
+      const nextAction = "Send calendar invite and prepare sales rep with call context.";
+      turn = scriptedTurn("Perfect, I booked " + formattedTime + " with " + meeting.salesRep + ". Thanks for your time.",
+        "high", nextAction, "meeting_booked");
+      summary = { ...prior.summary, interestLevel: "high", meetingStatus: "booked", bookedSlotId: meeting.slotId,
+        recommendedNextAction: nextAction, shortSummaryForSales: lead.name + " booked a meeting with " + meeting.salesRep + " for " + formattedTime + "." };
+      terminal = true;
+    } else if (previousOptions.length > 0 && (intent.shouldBookMeeting || /^\s*(?:yes|sure|okay|ok)[.!\s]*$/i.test(leadReply))) {
+      turn = scriptedTurn("Which of the offered options works best for you?", "high", "Wait for an explicit slot selection.", "interested");
+    } else if (shouldOfferCalendarOptions(intent, leadReply, transcript)) {
+      const slots = await availabilityForTurn(statusEvents, tools);
+      offeredSlotIds = slots.slice(0, 2).map((slot) => slot.id);
+      turn = scriptedTurn(calendarOptionsMessage(slots, lead), "high", calendarNextAction(slots), "interested");
+    } else {
+      statusEvents.push({ status: "thinking", label: "Carla is reasoning from lead response" });
+      turn = await generateCarlaTurn(client, lead, entries);
+      if (carlaPromisedCalendarCheck(turn) && intent.shouldCheckCalendar) {
+        const slots = await availabilityForTurn(statusEvents, tools);
+        offeredSlotIds = slots.slice(0, 2).map((slot) => slot.id);
+        turn.reply = turn.reply + " " + calendarOptionsMessage(slots, lead);
+        turn.nextBestAction = calendarNextAction(slots);
+      }
+    }
+
+    statusEvents.push({ status: "agent_speaking", label: agentConfig.name + " speaking" });
+    entries.push({ speaker: "agent", name: agentConfig.name, message: turn.reply });
+    const result = interactiveCallResult({
+      callId: id, lead, transcript: entries, toolCalls: tools, statusEvents,
+      intentDetections: [...(prior.intentDetections ?? []), intent], latestTurn: turn,
+      summaryOverride: summary, forceFinal: terminal,
+    });
+    if (!summary) {
+      result.summary.painPoints = [...new Set([...prior.summary.painPoints, ...result.summary.painPoints])];
+      result.summary.objections = [...new Set([...prior.summary.objections, ...result.summary.objections])];
+    }
+    return persistCall(result, { kind: metadata.kind, offeredSlotIds, turnToken });
+  });
+};
+
+function scriptedTurn(reply: string, interestLevel: CarlaTurn["interestLevel"], nextBestAction: string, outcome: CarlaTurn["outcome"]): CarlaTurn {
+  return { reply, detectedPainPoints: [], detectedObjections: [], interestLevel,
+    recommendedToolCall: { name: "none", reason: "Handled by the call workflow." }, outcome, nextBestAction };
+}
+
+async function availabilityForTurn(statusEvents: CallResult["statusEvents"], toolCalls: CallToolCall[]) {
+  statusEvents.push({ status: "thinking", label: "Checking calendar availability" });
+  const slots = await checkCalendarAvailability();
+  toolCalls.push({ name: "checkCalendarAvailability", input: {}, output: slots });
+  return slots;
+}
+
+function calendarNextAction(slots: CalendarSlot[]) {
+  return slots.length ? "Wait for the lead to confirm an offered slot." : "Have sales follow up with available meeting times.";
+}
+
+function selectOfferedSlot(options: string[], reply: string) {
+  if (!options.length || /\b(no|not|nothing|neither|can't|won't|don't|cannot|maybe|if|unless|instead)\b/i.test(reply)) return undefined;
+  const match = reply.trim().match(/^(?:yes[, ]+)?(?:the )?(?:(?:option\s*(1|2|one|two))|(?:(first|second)(?:\s+(?:one|option|slot))?))(?:\s+(?:works(?: for me)?|is fine|please))?[.!]*$/i);
+  if (match) {
+    const selected = (match[1] ?? match[2]).toLowerCase();
+    return options[["1", "one", "first"].includes(selected) ? 0 : 1];
+  }
+  if (options.length === 1 && /^(yes|okay|ok|sure|that works|book it)(?:[, ]+please)?[.!]*$/i.test(reply.trim())) return options[0];
+  return undefined;
+}
+
 
 const generateCarlaTurn = async (
   client: OpenAI,
@@ -573,13 +516,7 @@ const generateCarlaTurn = async (
       },
     ],
   });
-  const content = response.choices[0]?.message.content;
-
-  if (!content) {
-    throw new Error("OpenAI returned an empty Carla turn.");
-  }
-
-  return JSON.parse(content) as CarlaTurn;
+  return parseModelOutput(carlaTurnSchema, response.choices[0]?.message.content);
 };
 
 const interactiveCallResult = ({
@@ -621,6 +558,9 @@ const interactiveCallResult = ({
   const leadTurnCount = transcript.filter((entry) => entry.speaker === "lead").length;
   const isFinal =
     forceFinal || summary.meetingStatus === "booked" || leadTurnCount >= maxInteractiveLeadTurns();
+  if (isFinal && !summaryOverride) {
+    summary.shortSummaryForSales = shortSummaryFor(lead, summary.interestLevel, summary.meetingStatus, summary.recommendedNextAction);
+  }
 
   return {
     callId,
@@ -682,37 +622,11 @@ const detectLeadIntent = async (
       },
     ],
   });
-  const content = response.choices[0]?.message.content;
-
-  if (!content) {
-    throw new Error("OpenAI returned an empty lead intent classification.");
-  }
-
-  const parsed = JSON.parse(content) as Partial<Omit<LeadIntentDetection, "leadMessage">>;
-
-  return {
-    leadMessage,
-    intent: leadIntentValues.includes(parsed.intent as LeadIntentDetection["intent"])
-      ? (parsed.intent as LeadIntentDetection["intent"])
-      : "unqualified",
-    objectionType: objectionTypeValues.includes(
-      parsed.objectionType as LeadIntentDetection["objectionType"],
-    )
-      ? (parsed.objectionType as LeadIntentDetection["objectionType"])
-      : "none",
-    shouldCheckCalendar: Boolean(parsed.shouldCheckCalendar),
-    shouldBookMeeting: Boolean(parsed.shouldBookMeeting),
-    nextAgentMove: nextAgentMoveValues.includes(
-      parsed.nextAgentMove as LeadIntentDetection["nextAgentMove"],
-    )
-      ? (parsed.nextAgentMove as LeadIntentDetection["nextAgentMove"])
-      : "close",
-    reasoning: parsed.reasoning ?? "No model reasoning provided.",
-  };
+  return { leadMessage, ...parseModelOutput(intentSchema, response.choices[0]?.message.content) };
 };
 
 const leadContextForLlm = (lead: Lead): LeadContextForLlm => {
-  const { scenario: _scenario, ...context } = lead;
+  const { scenario: _scenario, phoneNumber: _phoneNumber, ...context } = lead;
 
   return context;
 };
@@ -795,25 +709,6 @@ const shouldSendTimeSlotsByEmail = (
   return asksForSlots && (mentionsEmail || followsNoSlotMessage);
 };
 
-const shouldBookFromReply = (
-  intent: LeadIntentDetection,
-  transcript: CallTranscriptEntry[],
-  leadReply: string,
-) => {
-  const normalized = leadReply.toLowerCase();
-  const previousAgentMessage = [...transcript]
-    .reverse()
-    .find((entry) => entry.speaker === "agent")?.message.toLowerCase();
-  const hasOfferedSlots =
-    previousAgentMessage?.includes("option 1") || previousAgentMessage?.includes("available slots");
-
-  return (
-    intent.shouldBookMeeting ||
-    (Boolean(hasOfferedSlots) &&
-      /\b(ok|yes|works|book|confirm|that works|sounds good|option 1|first)\b/.test(normalized))
-  );
-};
-
 const calendarOptionsMessage = (slots: CalendarSlot[], lead: Lead) => {
   const availableSlots = slots.slice(0, 2);
 
@@ -828,7 +723,7 @@ const calendarOptionsMessage = (slots: CalendarSlot[], lead: Lead) => {
   return `Absolutely. Since you are evaluating whether AI agents can help with ${lead.discussionTopic.toLowerCase()}, a short meeting is the right place to map that to your current workflow. I checked the calendar and can offer ${options}. Which one works best for you?`;
 };
 
-const formatSlot = (slot: CalendarSlot) =>
+const formatSlot = (slot: Pick<CalendarSlot, "startsAt">) =>
   new Intl.DateTimeFormat("en-US", {
     dateStyle: "medium",
     timeStyle: "short",

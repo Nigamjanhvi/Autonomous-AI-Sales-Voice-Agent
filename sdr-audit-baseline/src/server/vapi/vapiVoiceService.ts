@@ -2,10 +2,15 @@ import { VapiClient } from "@vapi-ai/server-sdk";
 import {
   runInteractiveLlmTurn,
   startInteractiveLlmCall,
+  voiceCallId,
 } from "../agent/llmCallOrchestrator.js";
 import { agentConfig } from "../config/agent.config.js";
+import { ApiError, isDuplicate } from "../http/errors.js";
+import type { vapiCompletionBody, vapiWebhookBody } from "../http/validation.js";
+import { callIsComplete, endCall, getCall, persistCall } from "../services/calls.js";
 import { getLeadContext } from "../tools/getLeadContext.js";
-import type { CallTranscriptEntry } from "../types.js";
+import type { Lead } from "../types.js";
+import type { z } from "zod";
 
 const vapiAssistantPrompt =
   "You are Carla, an AI SDR. Follow the backend-provided conversation instructions and use the configured tools. Keep responses concise, natural, and professional.";
@@ -24,7 +29,7 @@ const requireVapiApiKey = () => {
   const apiKey = process.env.VAPI_API_KEY;
 
   if (!apiKey || apiKey === "replace_me") {
-    throw new Error("VAPI_API_KEY is required for Vapi voice calls.");
+    throw new ApiError(503, "VAPI_NOT_CONFIGURED", "VAPI_API_KEY is required for Vapi voice calls.");
   }
 
   return apiKey;
@@ -44,42 +49,8 @@ type StartVapiVoiceCallInput = {
   customerNumber?: string;
 };
 
-type VapiCustomLlmMessage = {
-  role?: string;
-  content?: string | Array<{ text?: string; type?: string }>;
-};
-
-type VapiCustomLlmBody = {
-  messages?: VapiCustomLlmMessage[];
-  call?: {
-    id?: string;
-    metadata?: {
-      leadId?: string;
-    };
-    assistantOverrides?: {
-      metadata?: {
-        leadId?: string;
-      };
-      variableValues?: {
-        leadId?: string;
-      };
-    };
-    variableValues?: {
-      leadId?: string;
-    };
-  };
-  metadata?: {
-    leadId?: string;
-  };
-  assistantOverrides?: {
-    metadata?: {
-      leadId?: string;
-    };
-    variableValues?: {
-      leadId?: string;
-    };
-  };
-};
+type VapiCustomLlmBody = z.infer<typeof vapiCompletionBody>;
+type VapiCustomLlmMessage = NonNullable<VapiCustomLlmBody["messages"]>[number];
 
 export const getVapiConfig = () => ({
   enabled: Boolean(process.env.VAPI_API_KEY && process.env.VAPI_API_KEY !== "replace_me"),
@@ -97,14 +68,19 @@ export const startVapiVoiceCall = async ({
   customerNumber,
 }: StartVapiVoiceCallInput) => {
   const lead = await getLeadContext(leadId);
+  const outbound = canPlaceOutboundCall();
+  if (outbound && (!lead.phoneNumber || (customerNumber && customerNumber !== lead.phoneNumber))) {
+    throw new ApiError(400, "CUSTOMER_MISMATCH", "A CRM phone number is required and must match any provided customer number.");
+  }
+  const number = outbound ? lead.phoneNumber : (customerNumber ?? lead.phoneNumber);
   const phoneNumberId = process.env.VAPI_PHONE_NUMBER_ID;
   const assistantId = process.env.VAPI_ASSISTANT_ID || undefined;
   const plannedCall = {
     name: `Carla voice call - ${lead.name}`,
     phoneNumberId: phoneNumberId && phoneNumberId !== "replace_me" ? phoneNumberId : undefined,
-    customer: customerNumber
+    customer: number
       ? {
-          number: customerNumber,
+          number,
           name: lead.name,
         }
       : undefined,
@@ -112,7 +88,10 @@ export const startVapiVoiceCall = async ({
     assistantOverrides: assistantId
       ? {
           maxDurationSeconds: maxCallDurationSeconds(),
-          serverUrl: `${publicBaseUrl()}/api/vapi/webhook`,
+          ...(process.env.VAPI_PUBLIC_BASE_URL ? { server: {
+            url: `${publicBaseUrl()}/api/vapi/webhook`,
+            credentialId: process.env.VAPI_SERVER_CREDENTIAL_ID || undefined,
+          } } : {}),
         }
       : undefined,
     metadata: {
@@ -123,7 +102,7 @@ export const startVapiVoiceCall = async ({
     },
   };
 
-  if (!canPlaceOutboundCall()) {
+  if (!outbound) {
     return {
       status: "dry_run",
       reason:
@@ -136,28 +115,29 @@ export const startVapiVoiceCall = async ({
   requireVapiApiKey();
 
   if (outboundCallsCreated >= maxOutboundCalls()) {
-    throw new Error(
-      `Vapi outbound call budget reached for this server process: ${outboundCallsCreated}/${maxOutboundCalls()}.`,
-    );
+    throw new ApiError(429, "VAPI_BUDGET_REACHED", "The Vapi outbound call budget has been reached.");
   }
 
   if (!plannedCall.phoneNumberId) {
-    throw new Error("VAPI_PHONE_NUMBER_ID is required when VAPI_ALLOW_OUTBOUND_CALLS=true.");
+    throw new ApiError(503, "VAPI_NOT_CONFIGURED", "VAPI_PHONE_NUMBER_ID is required when outbound calls are enabled.");
   }
 
   if (!plannedCall.assistantId) {
-    throw new Error(
-      "VAPI_ASSISTANT_ID is required when VAPI_ALLOW_OUTBOUND_CALLS=true. Keep the Vapi assistant prompt minimal and use this backend for agent logic.",
-    );
-  }
-
-  if (!plannedCall.customer?.number) {
-    throw new Error("customerNumber is required when creating a real Vapi outbound call.");
+    throw new ApiError(503, "VAPI_NOT_CONFIGURED", "VAPI_ASSISTANT_ID is required when outbound calls are enabled.");
   }
 
   const vapi = new VapiClient({ token: requireVapiApiKey() });
-  const call = await vapi.calls.create(plannedCall as Parameters<typeof vapi.calls.create>[0]);
   outboundCallsCreated += 1;
+  let call;
+  try {
+    call = await vapi.calls.create(plannedCall);
+  } catch {
+    throw new ApiError(502, "VAPI_REQUEST_FAILED", "Vapi could not confirm the outbound request.");
+  }
+  if (!("id" in call) || typeof call.id !== "string") {
+    throw new ApiError(502, "VAPI_REQUEST_FAILED", "Vapi did not return a single call ID.");
+  }
+  await recordOutboundCall(voiceCallId(call.id), lead);
 
   return {
     status: "created",
@@ -171,9 +151,33 @@ export const startVapiVoiceCall = async ({
   };
 };
 
-export const handleVapiWebhook = async (body: unknown) => {
-  const message = (body as { message?: { type?: string } })?.message;
+async function recordOutboundCall(callId: string, lead: Lead) {
+  const nextAction = "Wait for the voice call to connect.";
+  try {
+    await persistCall({
+      callId, lead, mode: "llm", agent: agentConfig, transcript: [], toolCalls: [],
+      statusEvents: [{ status: "idle", label: "Waiting for voice connection" }],
+      summary: { leadId: lead.id, leadName: lead.name, company: lead.company, painPoints: [], objections: [],
+        interestLevel: "low", meetingStatus: "not_booked", recommendedNextAction: nextAction, shortSummaryForSales: "Voice call initiated." },
+      classification: { outcome: "needs_human_follow_up", recommendedNextAction: nextAction, reason: "The voice call has not started." },
+    }, { kind: "vapi", createOnly: true });
+  } catch (error) {
+    if (!isDuplicate(error)) throw error;
+    const { metadata } = await getCall(callId);
+    if (metadata.kind !== "vapi" || metadata.leadId !== lead.id) throw error;
+  }
+}
 
+export const handleVapiWebhook = async ({ message }: z.infer<typeof vapiWebhookBody>) => {
+  if (message.type === "end-of-call-report" && message.call?.id) {
+    const callId = voiceCallId(message.call.id);
+    try {
+      const { metadata } = await getCall(callId);
+      if (metadata.kind === "vapi" && metadata.status === "active") await endCall(callId, metadata.leadId, "vapi");
+    } catch (error) {
+      if (!(error instanceof ApiError && ["CALL_NOT_FOUND", "CALL_ENDED"].includes(error.code))) throw error;
+    }
+  }
   return {
     received: true,
     messageType: message?.type ?? "unknown",
@@ -182,8 +186,7 @@ export const handleVapiWebhook = async (body: unknown) => {
   };
 };
 
-export const handleVapiCustomLlmCompletion = async (body: unknown) => {
-  const parsedBody = body as VapiCustomLlmBody;
+export const handleVapiCustomLlmCompletion = async (parsedBody: VapiCustomLlmBody) => {
   const leadId =
     parsedBody.call?.metadata?.leadId ??
     parsedBody.metadata?.leadId ??
@@ -194,7 +197,7 @@ export const handleVapiCustomLlmCompletion = async (body: unknown) => {
     parsedBody.call?.variableValues?.leadId;
 
   if (!leadId) {
-    throw new Error(
+    throw new ApiError(400, "LEAD_REQUIRED",
       "Vapi Custom LLM requests must include call.metadata.leadId or metadata.leadId.",
     );
   }
@@ -204,15 +207,15 @@ export const handleVapiCustomLlmCompletion = async (body: unknown) => {
   const userMessageIndex = messages.findLastIndex((message) => message.role === "user");
   const latestLeadReply =
     userMessageIndex >= 0 ? messageContentToText(messages[userMessageIndex]) : "";
-  const callId = parsedBody.call?.id ? `${lead.id}-vapi-${parsedBody.call.id}` : undefined;
-  const call = latestLeadReply
+  const prior = await startInteractiveLlmCall(leadId, { providerCallId: parsedBody.call?.id });
+  const call = latestLeadReply && !callIsComplete(prior)
     ? await runInteractiveLlmTurn({
-        callId,
+        callId: prior.callId,
         leadId,
-        transcript: messagesToTranscript(messages.slice(0, userMessageIndex), lead.name),
-        leadReply: latestLeadReply,
+        leadReply: latestLeadReply.slice(0, 4000),
+        kind: "vapi",
       })
-    : await startInteractiveLlmCall(leadId);
+    : prior;
   const reply =
     [...call.transcript].reverse().find((entry) => entry.speaker === "agent")?.message ??
     "Thanks. I will have the sales team follow up with the next best step.";
@@ -260,16 +263,3 @@ const messageContentToText = (message: VapiCustomLlmMessage) => {
       .trim() ?? ""
   );
 };
-
-const messagesToTranscript = (
-  messages: VapiCustomLlmMessage[],
-  leadName: string,
-): CallTranscriptEntry[] =>
-  messages
-    .filter((message) => message.role === "assistant" || message.role === "user")
-    .map((message) => ({
-      speaker: message.role === "assistant" ? ("agent" as const) : ("lead" as const),
-      name: message.role === "assistant" ? agentConfig.name : leadName,
-      message: messageContentToText(message),
-    }))
-    .filter((entry) => entry.message);

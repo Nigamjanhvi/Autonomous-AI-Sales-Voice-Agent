@@ -1,91 +1,47 @@
+import { timingSafeEqual } from "node:crypto";
 import { Router } from "express";
-import { runInteractiveLlmTurn } from "../agent/llmCallOrchestrator.js";
-import type { CallTranscriptEntry } from "../types.js";
-import {
-  getVapiConfig,
-  handleVapiCustomLlmCompletion,
-  handleVapiWebhook,
-  startVapiVoiceCall,
-} from "../vapi/vapiVoiceService.js";
+import type { Request } from "express";
+import { runInteractiveLlmTurn, startInteractiveLlmCall } from "../agent/llmCallOrchestrator.js";
+import { ApiError } from "../http/errors.js";
+import { turnBody, validated, vapiCompletionBody, vapiStartBody, vapiWebhookBody } from "../http/validation.js";
+import { callIsComplete } from "../services/calls.js";
+import { getVapiConfig, handleVapiCustomLlmCompletion, handleVapiWebhook, startVapiVoiceCall } from "../vapi/vapiVoiceService.js";
 
 export const vapiRouter = Router();
 
-vapiRouter.get("/vapi/config", (_req, res) => {
+function verifyVapiRequest(req: Request, required = false) {
+  const secret = process.env.VAPI_SHARED_SECRET?.trim();
+  if (!secret) {
+    if (required) throw new ApiError(503, "VAPI_NOT_CONFIGURED", "VAPI_SHARED_SECRET is required for real outbound calls.");
+    return;
+  }
+  const actual = Buffer.from(req.get("authorization") ?? "");
+  const expected = Buffer.from("Bearer " + secret);
+  if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+    throw new ApiError(401, "UNAUTHORIZED", "Vapi authorization failed.");
+  }
+}
+
+vapiRouter.get("/vapi/config", validated({}, (_input, res) => {
   res.json({ vapi: getVapiConfig() });
-});
-
-vapiRouter.post("/vapi/calls", async (req, res, next) => {
-  try {
-    const { leadId, customerNumber } = req.body as {
-      leadId?: string;
-      customerNumber?: string;
-    };
-
-    if (!leadId) {
-      res.status(400).json({ error: "leadId is required" });
-      return;
-    }
-
-    res.status(201).json({
-      vapi: await startVapiVoiceCall({ leadId, customerNumber }),
-    });
-  } catch (error) {
-    next(error);
-  }
-});
-
-vapiRouter.post("/vapi/webhook", async (req, res, next) => {
-  try {
-    res.json(await handleVapiWebhook(req.body));
-  } catch (error) {
-    next(error);
-  }
-});
-
-vapiRouter.post("/vapi/chat/completions", async (req, res, next) => {
-  try {
-    res.json(await handleVapiCustomLlmCompletion(req.body));
-  } catch (error) {
-    next(error);
-  }
-});
-
-vapiRouter.post("/vapi/turn", async (req, res, next) => {
-  try {
-    const { callId, leadId, transcript, leadReply } = req.body as {
-      callId?: string;
-      leadId?: string;
-      transcript?: CallTranscriptEntry[];
-      leadReply?: string;
-    };
-
-    if (!leadId) {
-      res.status(400).json({ error: "leadId is required" });
-      return;
-    }
-
-    if (!Array.isArray(transcript)) {
-      res.status(400).json({ error: "transcript is required" });
-      return;
-    }
-
-    if (!leadReply?.trim()) {
-      res.status(400).json({ error: "leadReply is required" });
-      return;
-    }
-
-    const call = await runInteractiveLlmTurn({
-      callId,
-      leadId,
-      transcript,
-      leadReply: leadReply.trim(),
-    });
-
-    res.status(201).json({
-      call,
-      message: call.transcript[call.transcript.length - 1]?.message,
-    });
-  } catch (error) {
-    next(error);
-  }
-});
+}));
+vapiRouter.post("/vapi/calls", validated({ body: vapiStartBody }, async ({ body, req }, res) => {
+  if (getVapiConfig().allowOutboundCalls) verifyVapiRequest(req, true);
+  res.status(201).json({ vapi: await startVapiVoiceCall(body) });
+}));
+vapiRouter.post("/vapi/webhook", validated({ body: vapiWebhookBody }, async ({ body, req }, res) => {
+  verifyVapiRequest(req);
+  res.json(await handleVapiWebhook(body));
+}));
+vapiRouter.post("/vapi/chat/completions", validated({ body: vapiCompletionBody }, async ({ body, req }, res) => {
+  verifyVapiRequest(req);
+  res.json(await handleVapiCustomLlmCompletion(body));
+}));
+vapiRouter.post("/vapi/turn", validated({ body: turnBody }, async ({ body, req }, res) => {
+  verifyVapiRequest(req);
+  const prior = await startInteractiveLlmCall(body.leadId, { providerCallId: body.callId });
+  const call = callIsComplete(prior) ? prior : await runInteractiveLlmTurn({
+    callId: prior.callId, leadId: body.leadId, leadReply: body.leadReply, kind: "vapi",
+  });
+  res.status(201).json({ call, message: call.transcript.at(-1)?.message });
+}));

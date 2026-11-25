@@ -17,6 +17,7 @@ build/
 !.env.example
 coverage/
 logs/
+mongo-dev-data/
 
 # local virtual environments
 venv/
