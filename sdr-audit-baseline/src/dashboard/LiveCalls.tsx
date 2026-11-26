@@ -129,7 +129,7 @@ export function LiveCalls({ leads, agentProfile, preferences, requestedLead, onR
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [isStartModalOpen, setIsStartModalOpen] = useState(false)
-  const [selectedStartMode, setSelectedStartMode] = useState<StartMode>('predefined')
+  const [selectedStartMode, setSelectedStartMode] = useState<StartMode>('ai_interactive')
   const [showLiveVoice, setShowLiveVoice] = useState(false)
   const [activeStartMode, setActiveStartMode] = useState<StartMode | null>(null)
   const [activeCallMode, setActiveCallMode] = useState<CallMode | null>(null)

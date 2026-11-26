@@ -116,7 +116,9 @@ export function readStorage<T>(key: string, fallback: T): T {
   }
 }
 
-export const apiBase = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001').replace(/\/$/, '')
+// Use Vite's same-origin proxy in development. This keeps the API working when
+// Vite selects a fallback port (for example, 5174) and avoids browser CORS issues.
+export const apiBase = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '')
 
 export async function getApi<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(apiBase + path, { signal })
